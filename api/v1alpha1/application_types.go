@@ -23,13 +23,23 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+type ApplicationSpecRepo struct {
+	Url string `json:"url"`
+
+	// +kubebuilder:default:=main
+	Revision string `json:"revision,omitempty"`
+
+	// +kubebuilder:default:=.
+	Path string `json:"path,omitempty"`
+}
+
 // ApplicationSpec defines the desired state of Application
 type ApplicationSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// Foo is an example field of Application. Edit application_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	Repo ApplicationSpecRepo `json:"repo"`
 }
 
 // ApplicationStatus defines the observed state of Application

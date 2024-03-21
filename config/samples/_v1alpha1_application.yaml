@@ -9,4 +9,7 @@ metadata:
     app.kubernetes.io/created-by: vernal-operator
   name: application-sample
 spec:
-# TODO(user): Add fields here
+  repo:
+    url: https://github.com/vernaldev/test
+    revision: main
+    path: .
