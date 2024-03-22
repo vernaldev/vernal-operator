@@ -12,3 +12,6 @@ spec:
   - name: whoami
     image: traefik/whoami:latest
     containerPort: 80
+  - name: httpbin
+    image: kennethreitz/httpbin:latest
+    containerPort: 80
