@@ -27,7 +27,7 @@ import (
 	"vernaldev/vernal-operator/test/utils"
 )
 
-const namespace = "vernal-operator-system"
+const namespace = "vernal-system"
 
 var _ = Describe("controller", Ordered, func() {
 	BeforeAll(func() {

@@ -9,7 +9,12 @@ metadata:
     app.kubernetes.io/created-by: vernal-operator
   name: application-sample
 spec:
+  owner: vernal
   repo:
     url: https://github.com/vernaldev/test
     revision: main
-    path: .
+    path: vernal.yaml
+  components:
+  - name: whoami
+    image: traefik/whoami:latest
+    port: 80

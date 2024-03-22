@@ -23,13 +23,19 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+type ApplicationSpecComponent struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
+	Port  uint16 `json:"port"`
+}
+
 type ApplicationSpecRepo struct {
 	Url string `json:"url"`
 
 	// +kubebuilder:default:=main
 	Revision string `json:"revision,omitempty"`
 
-	// +kubebuilder:default:=.
+	// +kubebuilder:default:=vernal.yaml
 	Path string `json:"path,omitempty"`
 }
 
@@ -39,16 +45,21 @@ type ApplicationSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// Foo is an example field of Application. Edit application_types.go to remove/update
-	Repo ApplicationSpecRepo `json:"repo"`
+	Owner      string                     `json:"owner"`
+	Repo       ApplicationSpecRepo        `json:"repo"`
+	Components []ApplicationSpecComponent `json:"components"`
 }
 
 // ApplicationStatus defines the observed state of Application
 type ApplicationStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
 //+kubebuilder:object:root=true
+//+kubebuilder:resource:scope=Cluster
 //+kubebuilder:subresource:status
 
 // Application is the Schema for the applications API
@@ -61,6 +72,7 @@ type Application struct {
 }
 
 //+kubebuilder:object:root=true
+//+kubebuilder:resource:scope=Cluster
 
 // ApplicationList contains a list of Application
 type ApplicationList struct {
