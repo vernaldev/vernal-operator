@@ -42,16 +42,16 @@ spec:
               components:
                 items:
                   properties:
+                    containerPort:
+                      type: integer
                     image:
                       type: string
                     name:
                       type: string
-                    port:
-                      type: integer
                   required:
+                  - containerPort
                   - image
                   - name
-                  - port
                   type: object
                 type: array
               owner:

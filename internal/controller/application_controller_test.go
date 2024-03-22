@@ -71,9 +71,9 @@ var _ = Describe("Application Controller", func() {
 							Path:     "vernal.yaml",
 						},
 						Components: []vernaldevv1alpha1.ApplicationSpecComponent{{
-							Name:  applicationComponentName,
-							Image: "traefik/whoami:latest",
-							Port:  80,
+							Name:          applicationComponentName,
+							Image:         "traefik/whoami:latest",
+							ContainerPort: 80,
 						}},
 					},
 				}

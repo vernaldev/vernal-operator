@@ -24,9 +24,9 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 type ApplicationSpecComponent struct {
-	Name  string `json:"name"`
-	Image string `json:"image"`
-	Port  uint16 `json:"port"`
+	Name          string `json:"name"`
+	Image         string `json:"image"`
+	ContainerPort uint16 `json:"containerPort"`
 }
 
 type ApplicationSpecRepo struct {

@@ -1,15 +1,9 @@
 apiVersion: vernal.dev/v1alpha1
 kind: Application
 metadata:
-  labels:
-    app.kubernetes.io/name: application
-    app.kubernetes.io/instance: application-sample
-    app.kubernetes.io/part-of: vernal-operator
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/created-by: vernal-operator
-  name: application-sample
+  name: test
 spec:
-  owner: vernal
+  owner: dennis
   repo:
     url: https://github.com/vernaldev/test
     revision: main
@@ -17,4 +11,4 @@ spec:
   components:
   - name: whoami
     image: traefik/whoami:latest
-    port: 80
+    containerPort: 80

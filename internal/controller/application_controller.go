@@ -30,11 +30,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	vernaldevv1alpha1 "vernaldev/vernal-operator/api/v1alpha1"
 )
@@ -57,8 +59,10 @@ type ApplicationReconciler struct {
 //+kubebuilder:rbac:groups=vernal.dev,resources=applications/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -185,12 +189,49 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
+	if res, err := r.ReconcileNamespace(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	if res, err := r.ReconcileDeployments(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	if res, err := r.ReconcileServices(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	if res, err := r.ReconcileHTTPRoutes(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	meta.SetStatusCondition(
+		&application.Status.Conditions,
+		metav1.Condition{
+			Type:    applicationStatusTypeAvailable,
+			Status:  metav1.ConditionTrue,
+			Reason:  "Reconciling",
+			Message: "Successfully applied desired state for Application",
+		},
+	)
+
+	if err := r.Status().Update(ctx, &application); err != nil {
+		log.Error(err, "Failed to update Application status")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) ReconcileNamespace(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 	namespace := v1.Namespace{}
 	err := r.Get(ctx, types.NamespacedName{Name: namespaceName}, &namespace)
 
 	if err != nil && apierrors.IsNotFound(err) {
-		namespace, err := r.namespaceForApplication(&application)
+		namespace, err := r.namespaceForApplication(application)
 
 		if err != nil {
 			log.Error(err, "Failed to define new Namespace resource for Application")
@@ -206,7 +247,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				},
 			)
 
-			if err := r.Status().Update(ctx, &application); err != nil {
+			if err := r.Status().Update(ctx, application); err != nil {
 				log.Error(err, "Failed to update Application status")
 				return ctrl.Result{}, err
 			}
@@ -230,10 +271,16 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// TODO: apply namespace changes?
 
-	createdNewDeployments := false
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	createdDeployments := false
 	updatedDeployments := false
 	for _, component := range application.Spec.Components {
-		deployment, err := r.deploymentForApplicationComponent(&application, &component)
+		deployment, err := r.deploymentForApplicationComponent(application, &component)
 		if err != nil {
 			log.Error(err, "Failed to define Deployment resource for Application component")
 
@@ -247,7 +294,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				},
 			)
 
-			if err := r.Status().Update(ctx, &application); err != nil {
+			if err := r.Status().Update(ctx, application); err != nil {
 				log.Error(err, "Failed to update Application status")
 				return ctrl.Result{}, err
 			}
@@ -266,7 +313,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 
 			// Deployment created successfully
-			createdNewDeployments = true
+			createdDeployments = true
 			continue
 		} else if err != nil {
 			log.Error(err, "Failed to get Deployment for Application component")
@@ -287,7 +334,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				},
 			)
 
-			if err := r.Status().Update(ctx, &application); err != nil {
+			if err := r.Status().Update(ctx, application); err != nil {
 				log.Error(err, "Failed to update Application status")
 				return ctrl.Result{}, err
 			}
@@ -309,7 +356,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			// raising the error "the object has been modified, please apply
 			// your changes to the latest version and try again" which would re-trigger the reconciliation
 			// if we try to update it again in the following operations
-			if err := r.Get(ctx, req.NamespacedName, &application); err != nil {
+			if err := r.Get(ctx, req.NamespacedName, application); err != nil {
 				log.Error(err, "Failed to re-fetch Application")
 				return ctrl.Result{}, err
 			}
@@ -324,7 +371,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				},
 			)
 
-			if err := r.Status().Update(ctx, &application); err != nil {
+			if err := r.Status().Update(ctx, application); err != nil {
 				log.Error(err, "Failed to update Application status")
 				return ctrl.Result{}, err
 			}
@@ -333,7 +380,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	if createdNewDeployments {
+	if createdDeployments {
 		// Deployments created successfully
 		// We will requeue the reconciliation so that we can ensure the state
 		// and move forward for the next operations
@@ -347,19 +394,252 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	meta.SetStatusCondition(
-		&application.Status.Conditions,
-		metav1.Condition{
-			Type:    applicationStatusTypeAvailable,
-			Status:  metav1.ConditionTrue,
-			Reason:  "Reconciling",
-			Message: "Successfully applied desired state for Application",
-		},
-	)
+	return ctrl.Result{}, nil
+}
 
-	if err := r.Status().Update(ctx, &application); err != nil {
-		log.Error(err, "Failed to update Application status")
-		return ctrl.Result{}, err
+func (r *ApplicationReconciler) ReconcileServices(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	createdServices := false
+	updatedServices := false
+	for _, component := range application.Spec.Components {
+		service, err := r.serviceForApplicationComponent(application, &component)
+		if err != nil {
+			log.Error(err, "Failed to define Service resource for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to create new Service resource for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		found := v1.Service{}
+		err = r.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, &found)
+		if err != nil && apierrors.IsNotFound(err) {
+			log.Info("Creating new Service", "serviceName", service.Name, "serviceNamespace", service.Namespace)
+
+			if err := r.Create(ctx, service); err != nil {
+				log.Error(err, "Failed to create new Service", "serviceName", service.Name, "serviceNamespace", service.Namespace)
+				return ctrl.Result{}, err
+			}
+
+			// Service created successfully
+			createdServices = true
+			continue
+		} else if err != nil {
+			log.Error(err, "Failed to get Service for Application component")
+			// Let's return the error for the reconciliation be re-trigged again
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Update(ctx, service, client.DryRunAll); err != nil {
+			log.Error(err, "Failed to perform client dry-run of desired service state for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to perform client dry-run of desired service state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		if reflect.DeepEqual(found.Spec, service.Spec) {
+			// Service has not changed; skip update
+			continue
+		}
+
+		updatedServices = true
+		if err := r.Update(ctx, service); err != nil {
+			log.Error(err, "Failed to apply desired service state for Application component")
+
+			// Let's re-fetch the Application Custom Resource after updating the status
+			// so that we have the latest state of the resource on the cluster and we will avoid
+			// raising the error "the object has been modified, please apply
+			// your changes to the latest version and try again" which would re-trigger the reconciliation
+			// if we try to update it again in the following operations
+			if err := r.Get(ctx, req.NamespacedName, application); err != nil {
+				log.Error(err, "Failed to re-fetch Application")
+				return ctrl.Result{}, err
+			}
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to apply desired service state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+	}
+
+	if createdServices {
+		// Services created successfully
+		// We will requeue the reconciliation so that we can ensure the state
+		// and move forward for the next operations
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
+	if updatedServices {
+		// Now, that we updated the services, we want to requeue the reconciliation
+		// so that we can ensure that we have the latest state of the resource before
+		// update. Also, it will help ensure the desired state on the cluster
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) ReconcileHTTPRoutes(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	createdHTTPRoutes := false
+	updatedHTTPRoutes := false
+	for _, component := range application.Spec.Components {
+		httproute, err := r.httprouteForApplicationComponent(application, &component)
+		if err != nil {
+			log.Error(err, "Failed to define HTTPRoute resource for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to create new HTTPRoute resource for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		found := gwv1.HTTPRoute{}
+		err = r.Get(ctx, types.NamespacedName{Name: httproute.Name, Namespace: httproute.Namespace}, &found)
+		if err != nil && apierrors.IsNotFound(err) {
+			log.Info("Creating new HTTPRoute", "httprouteName", httproute.Name, "httprouteNamespace", httproute.Namespace)
+
+			if err := r.Create(ctx, httproute); err != nil {
+				log.Error(err, "Failed to create new HTTPRoute", "httprouteName", httproute.Name, "httprouteNamespace", httproute.Namespace)
+				return ctrl.Result{}, err
+			}
+
+			// HTTPRoute created successfully
+			createdHTTPRoutes = true
+			continue
+		} else if err != nil {
+			log.Error(err, "Failed to get HTTPRoute for Application component")
+			// Let's return the error for the reconciliation be re-trigged again
+			return ctrl.Result{}, err
+		}
+
+		httproute.SetResourceVersion(found.GetResourceVersion())
+
+		if err := r.Update(ctx, httproute, client.DryRunAll); err != nil {
+			log.Error(err, "Failed to perform client dry-run of desired httproute state for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to perform client dry-run of desired httproute state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		if reflect.DeepEqual(found.Spec, httproute.Spec) {
+			// HTTPRoute has not changed; skip update
+			continue
+		}
+
+		updatedHTTPRoutes = true
+		if err := r.Update(ctx, httproute); err != nil {
+			log.Error(err, "Failed to apply desired httproute state for Application component")
+
+			// Let's re-fetch the Application Custom Resource after updating the status
+			// so that we have the latest state of the resource on the cluster and we will avoid
+			// raising the error "the object has been modified, please apply
+			// your changes to the latest version and try again" which would re-trigger the reconciliation
+			// if we try to update it again in the following operations
+			if err := r.Get(ctx, req.NamespacedName, application); err != nil {
+				log.Error(err, "Failed to re-fetch Application")
+				return ctrl.Result{}, err
+			}
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to apply desired httproute state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+	}
+
+	if createdHTTPRoutes {
+		// HTTPRoutes created successfully
+		// We will requeue the reconciliation so that we can ensure the state
+		// and move forward for the next operations
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
+	if updatedHTTPRoutes {
+		// Now, that we updated the httproutes, we want to requeue the reconciliation
+		// so that we can ensure that we have the latest state of the resource before
+		// update. Also, it will help ensure the desired state on the cluster
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -427,7 +707,7 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 					Name:            component.Name,
 					Image:           component.Image,
 					ImagePullPolicy: v1.PullAlways,
-					Ports:           []v1.ContainerPort{{ContainerPort: int32(component.Port)}},
+					Ports:           []v1.ContainerPort{{ContainerPort: int32(component.ContainerPort)}},
 
 					// TODO: Implement environment variables through Sealed Secrets
 					// EnvFrom: []v1.EnvFromSource{{SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{
@@ -443,6 +723,77 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 	}
 
 	return &deployment, nil
+}
+
+func (r *ApplicationReconciler) serviceForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*v1.Service, error) {
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	serviceName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
+	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image)
+
+	service := v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: namespaceName,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: labels,
+			Type:     v1.ServiceTypeClusterIP,
+			Ports: []v1.ServicePort{{
+				Protocol:   v1.ProtocolTCP,
+				Port:       80,
+				TargetPort: intstr.FromInt(int(component.ContainerPort)),
+			}},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, &service, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return &service, nil
+}
+
+func (r *ApplicationReconciler) httprouteForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*gwv1.HTTPRoute, error) {
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	commonName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
+
+	parentRefName := gwv1.ObjectName("vernal")
+	parentRefNamespace := gwv1.Namespace("istio-ingress")
+	hostname := gwv1.Hostname(fmt.Sprintf("%s-%s-%s-app.local.lan.vernal.dev", component.Name, application.Name, application.Spec.Owner))
+	matchPathType := gwv1.PathMatchPathPrefix
+	matchPathValue := "/"
+	backendRefPort := gwv1.PortNumber(80)
+
+	httproute := gwv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      commonName,
+			Namespace: namespaceName,
+		},
+		Spec: gwv1.HTTPRouteSpec{
+			CommonRouteSpec: gwv1.CommonRouteSpec{
+				ParentRefs: []gwv1.ParentReference{{Name: parentRefName, Namespace: &parentRefNamespace}},
+			},
+			Hostnames: []gwv1.Hostname{hostname},
+			Rules: []gwv1.HTTPRouteRule{{
+				Matches: []gwv1.HTTPRouteMatch{{
+					Path: &gwv1.HTTPPathMatch{
+						Type:  &matchPathType,
+						Value: &matchPathValue,
+					},
+				}},
+				BackendRefs: []gwv1.HTTPBackendRef{{BackendRef: gwv1.BackendRef{BackendObjectReference: gwv1.BackendObjectReference{
+					Name: gwv1.ObjectName(commonName),
+					Port: &backendRefPort,
+				}}}},
+			}},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, &httproute, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return &httproute, nil
 }
 
 // labelsForApplicationNamespace returns the labels for selecting the resources
@@ -477,5 +828,7 @@ func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&vernaldevv1alpha1.Application{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&v1.Namespace{}).
+		Owns(&v1.Service{}).
+		Owns(&gwv1.HTTPRoute{}).
 		Complete(r)
 }
