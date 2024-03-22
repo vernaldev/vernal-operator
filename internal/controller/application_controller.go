@@ -277,6 +277,9 @@ func (r *ApplicationReconciler) ReconcileNamespace(ctx context.Context, req ctrl
 func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
+	deploymentNames := make(map[string]struct{})
+	deploymentExists := struct{}{}
+
 	createdDeployments := false
 	updatedDeployments := false
 	for _, component := range application.Spec.Components {
@@ -301,6 +304,8 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 
 			return ctrl.Result{}, err
 		}
+
+		deploymentNames[deployment.Name] = deploymentExists
 
 		found := appsv1.Deployment{}
 		err = r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &found)
@@ -347,6 +352,8 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 			continue
 		}
 
+		log.Info("Updating Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+
 		updatedDeployments = true
 		if err := r.Update(ctx, deployment); err != nil {
 			log.Error(err, "Failed to apply desired deployment state for Application component")
@@ -380,6 +387,65 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 		}
 	}
 
+	deploymentList := appsv1.DeploymentList{}
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+
+	if err := r.List(
+		ctx,
+		&deploymentList,
+		client.InNamespace(namespaceName),
+		client.MatchingLabels{
+			"app.kubernetes.io/part-of":    application.Name,
+			"app.kubernetes.io/managed-by": "vernal-operator",
+		},
+	); err != nil {
+		log.Error(err, "Failed to list Deployment resources for Application")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    applicationStatusTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to list Deployment resources for Application: %s", err),
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	for _, deployment := range deploymentList.Items {
+		if _, ok := deploymentNames[deployment.Name]; !ok {
+			log.Info("Deleting old Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+
+			if err := r.Delete(ctx, &deployment); err != nil {
+				log.Error(err, "Failed to delete Deployment resource for Application", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to delete Deployment resource for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
 	if createdDeployments {
 		// Deployments created successfully
 		// We will requeue the reconciliation so that we can ensure the state
@@ -399,6 +465,9 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 
 func (r *ApplicationReconciler) ReconcileServices(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+
+	serviceNames := make(map[string]struct{})
+	serviceExists := struct{}{}
 
 	createdServices := false
 	updatedServices := false
@@ -424,6 +493,8 @@ func (r *ApplicationReconciler) ReconcileServices(ctx context.Context, req ctrl.
 
 			return ctrl.Result{}, err
 		}
+
+		serviceNames[service.Name] = serviceExists
 
 		found := v1.Service{}
 		err = r.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, &found)
@@ -470,6 +541,8 @@ func (r *ApplicationReconciler) ReconcileServices(ctx context.Context, req ctrl.
 			continue
 		}
 
+		log.Info("Updating Service", "serviceName", service.Name, "serviceNamespace", service.Namespace)
+
 		updatedServices = true
 		if err := r.Update(ctx, service); err != nil {
 			log.Error(err, "Failed to apply desired service state for Application component")
@@ -503,6 +576,65 @@ func (r *ApplicationReconciler) ReconcileServices(ctx context.Context, req ctrl.
 		}
 	}
 
+	serviceList := v1.ServiceList{}
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+
+	if err := r.List(
+		ctx,
+		&serviceList,
+		client.InNamespace(namespaceName),
+		client.MatchingLabels{
+			"app.kubernetes.io/part-of":    application.Name,
+			"app.kubernetes.io/managed-by": "vernal-operator",
+		},
+	); err != nil {
+		log.Error(err, "Failed to list Service resources for Application")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    applicationStatusTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to list Service resources for Application: %s", err),
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	for _, service := range serviceList.Items {
+		if _, ok := serviceNames[service.Name]; !ok {
+			log.Info("Deleting old Service", "serviceName", service.Name, "serviceNamespace", service.Namespace)
+
+			if err := r.Delete(ctx, &service); err != nil {
+				log.Error(err, "Failed to delete Service resource for Application", "serviceName", service.Name, "serviceNamespace", service.Namespace)
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to delete Service resource for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
 	if createdServices {
 		// Services created successfully
 		// We will requeue the reconciliation so that we can ensure the state
@@ -522,6 +654,9 @@ func (r *ApplicationReconciler) ReconcileServices(ctx context.Context, req ctrl.
 
 func (r *ApplicationReconciler) ReconcileHTTPRoutes(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+
+	httprouteNames := make(map[string]struct{})
+	httprouteExists := struct{}{}
 
 	createdHTTPRoutes := false
 	updatedHTTPRoutes := false
@@ -547,6 +682,8 @@ func (r *ApplicationReconciler) ReconcileHTTPRoutes(ctx context.Context, req ctr
 
 			return ctrl.Result{}, err
 		}
+
+		httprouteNames[httproute.Name] = httprouteExists
 
 		found := gwv1.HTTPRoute{}
 		err = r.Get(ctx, types.NamespacedName{Name: httproute.Name, Namespace: httproute.Namespace}, &found)
@@ -595,6 +732,8 @@ func (r *ApplicationReconciler) ReconcileHTTPRoutes(ctx context.Context, req ctr
 			continue
 		}
 
+		log.Info("Updating HTTPRoute", "httprouteName", httproute.Name, "httprouteNamespace", httproute.Namespace)
+
 		updatedHTTPRoutes = true
 		if err := r.Update(ctx, httproute); err != nil {
 			log.Error(err, "Failed to apply desired httproute state for Application component")
@@ -625,6 +764,65 @@ func (r *ApplicationReconciler) ReconcileHTTPRoutes(ctx context.Context, req ctr
 			}
 
 			return ctrl.Result{}, err
+		}
+	}
+
+	httprouteList := gwv1.HTTPRouteList{}
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+
+	if err := r.List(
+		ctx,
+		&httprouteList,
+		client.InNamespace(namespaceName),
+		client.MatchingLabels{
+			"app.kubernetes.io/part-of":    application.Name,
+			"app.kubernetes.io/managed-by": "vernal-operator",
+		},
+	); err != nil {
+		log.Error(err, "Failed to list HTTPRoute resources for Application")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    applicationStatusTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to list HTTPRoute resources for Application: %s", err),
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	for _, httproute := range httprouteList.Items {
+		if _, ok := httprouteNames[httproute.Name]; !ok {
+			log.Info("Deleting old HTTPRoute", "httprouteName", httproute.Name, "httprouteNamespace", httproute.Namespace)
+
+			if err := r.Delete(ctx, &httproute); err != nil {
+				log.Error(err, "Failed to delete HTTPRoute resource for Application", "httprouteName", httproute.Name, "httprouteNamespace", httproute.Namespace)
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to delete HTTPRoute resource for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -693,6 +891,7 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deploymentName,
 			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
@@ -734,6 +933,7 @@ func (r *ApplicationReconciler) serviceForApplicationComponent(application *vern
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
 			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: v1.ServiceSpec{
 			Selector: labels,
@@ -756,6 +956,7 @@ func (r *ApplicationReconciler) serviceForApplicationComponent(application *vern
 func (r *ApplicationReconciler) httprouteForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*gwv1.HTTPRoute, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 	commonName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
+	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image)
 
 	parentRefName := gwv1.ObjectName("vernal")
 	parentRefNamespace := gwv1.Namespace("istio-ingress")
@@ -768,6 +969,7 @@ func (r *ApplicationReconciler) httprouteForApplicationComponent(application *ve
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      commonName,
 			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: gwv1.HTTPRouteSpec{
 			CommonRouteSpec: gwv1.CommonRouteSpec{

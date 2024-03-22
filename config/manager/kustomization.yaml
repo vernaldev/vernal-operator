@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: vcr.local.lan.vernal.dev:5000/vernaldev/vernal-operator
-  newTag: 0.1.0-alpha15
+  newTag: 0.1.0-alpha22
