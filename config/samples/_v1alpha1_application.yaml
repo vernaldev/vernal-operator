@@ -12,6 +12,10 @@ spec:
   - name: whoami
     image: traefik/whoami:latest
     containerPort: 80
+    minReplicas: 1
+    maxReplicas: 5
   - name: httpbin
     image: kennethreitz/httpbin:latest
     containerPort: 80
+    minReplicas: 1
+    maxReplicas: 5

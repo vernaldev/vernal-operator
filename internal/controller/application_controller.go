@@ -24,6 +24,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -197,6 +198,10 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return res, err
 	}
 
+	if res, err := r.ReconcileHorizontalPodAutoscaler(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
 	if res, err := r.ReconcileServices(ctx, req, &application); !res.IsZero() || err != nil {
 		return res, err
 	}
@@ -284,6 +289,195 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 	updatedDeployments := false
 	for _, component := range application.Spec.Components {
 		deployment, err := r.deploymentForApplicationComponent(application, &component)
+		if err != nil {
+			log.Error(err, "Failed to define Deployment resource for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to create new Deployment resource for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		deploymentNames[deployment.Name] = deploymentExists
+
+		found := appsv1.Deployment{}
+		err = r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &found)
+		if err != nil && apierrors.IsNotFound(err) {
+			log.Info("Creating new Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+
+			if err := r.Create(ctx, deployment); err != nil {
+				log.Error(err, "Failed to create new Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+				return ctrl.Result{}, err
+			}
+
+			// Deployment created successfully
+			createdDeployments = true
+			continue
+		} else if err != nil {
+			log.Error(err, "Failed to get Deployment for Application component")
+			// Let's return the error for the reconciliation be re-trigged again
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Update(ctx, deployment, client.DryRunAll); err != nil {
+			log.Error(err, "Failed to perform client dry-run of desired deployment state for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to perform client dry-run of desired deployment state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		if reflect.DeepEqual(found.Spec, deployment.Spec) {
+			// Deployment has not changed; skip update
+			continue
+		}
+
+		log.Info("Updating Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+
+		updatedDeployments = true
+		if err := r.Update(ctx, deployment); err != nil {
+			log.Error(err, "Failed to apply desired deployment state for Application component")
+
+			// Let's re-fetch the Application Custom Resource after updating the status
+			// so that we have the latest state of the resource on the cluster and we will avoid
+			// raising the error "the object has been modified, please apply
+			// your changes to the latest version and try again" which would re-trigger the reconciliation
+			// if we try to update it again in the following operations
+			if err := r.Get(ctx, req.NamespacedName, application); err != nil {
+				log.Error(err, "Failed to re-fetch Application")
+				return ctrl.Result{}, err
+			}
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to apply desired deployment state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+	}
+
+	deploymentList := appsv1.DeploymentList{}
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+
+	if err := r.List(
+		ctx,
+		&deploymentList,
+		client.InNamespace(namespaceName),
+		client.MatchingLabels{
+			"app.kubernetes.io/part-of":    application.Name,
+			"app.kubernetes.io/managed-by": "vernal-operator",
+		},
+	); err != nil {
+		log.Error(err, "Failed to list Deployment resources for Application")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    applicationStatusTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to list Deployment resources for Application: %s", err),
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	for _, deployment := range deploymentList.Items {
+		if _, ok := deploymentNames[deployment.Name]; !ok {
+			log.Info("Deleting old Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+
+			if err := r.Delete(ctx, &deployment); err != nil {
+				log.Error(err, "Failed to delete Deployment resource for Application", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to delete Deployment resource for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	if createdDeployments {
+		// Deployments created successfully
+		// We will requeue the reconciliation so that we can ensure the state
+		// and move forward for the next operations
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
+	if updatedDeployments {
+		// Now, that we updated the deployments, we want to requeue the reconciliation
+		// so that we can ensure that we have the latest state of the resource before
+		// update. Also, it will help ensure the desired state on the cluster
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	deploymentNames := make(map[string]struct{})
+	deploymentExists := struct{}{}
+
+	createdDeployments := false
+	updatedDeployments := false
+	for _, component := range application.Spec.Components {
+		deployment, err := r.hpaForApplicationComponent(application, &component)
 		if err != nil {
 			log.Error(err, "Failed to define Deployment resource for Application component")
 
@@ -875,6 +1069,28 @@ func (r *ApplicationReconciler) namespaceForApplication(application *vernaldevv1
 	}
 
 	return &namespace, nil
+}
+
+func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*autoscalingv2.HorizontalPodAutoscaler, error) {
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	labels := labelsForApplicationNamespace(application.GetName(), namespaceName)
+
+	hpa := autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   namespaceName,
+			Labels: labels,
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			MinReplicas: &component.MinReplicas,
+			MaxReplicas: component.MaxReplicas,
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, &hpa, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return &hpa, nil
 }
 
 func (r *ApplicationReconciler) deploymentForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*appsv1.Deployment, error) {
