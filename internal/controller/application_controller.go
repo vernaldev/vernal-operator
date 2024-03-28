@@ -28,6 +28,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1120,6 +1121,10 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 
 	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image)
 	var replicas int32 = 1
+	var cpuRequest int64 = 100
+	var memoryRequest int64 = 256
+	var cpuLimit int64 = 100
+	var memoryLimit int64 = 2512
 
 	deployment := appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1141,6 +1146,17 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 					Image:           component.Image,
 					ImagePullPolicy: v1.PullAlways,
 					Ports:           []v1.ContainerPort{{ContainerPort: int32(component.ContainerPort)}},
+
+					Resources: v1.ResourceRequirements{
+						Requests: v1.ResourceList{
+							v1.ResourceCPU:    *resource.NewMilliQuantity(cpuRequest, resource.DecimalSI),
+							v1.ResourceMemory: *resource.NewQuantity(memoryRequest, resource.BinarySI),
+						},
+						Limits: v1.ResourceList{
+							v1.ResourceCPU:    *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
+							v1.ResourceMemory: *resource.NewQuantity(memoryLimit, resource.BinarySI),
+						},
+					},
 
 					// TODO: Implement environment variables through Sealed Secrets
 					// EnvFrom: []v1.EnvFromSource{{SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{
