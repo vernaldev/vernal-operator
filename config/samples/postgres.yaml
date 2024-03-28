@@ -1,0 +1,16 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: vernal-app-database
+spec:
+  instances: 3
+  bootstrap:
+    initdb:
+      database: vernalapp
+      owner: vernalapp
+      secret:
+        name: postgres-secret
+      dataChecksums: true
+      encoding: UTF8
+  storage:
+    size: 50Gi

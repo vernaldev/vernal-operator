@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -202,6 +204,11 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if res, err := r.ReconcileHTTPRoutes(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	// PostgreSQL into the Reconcile flow
+	if res, err := r.ReconcilePostgreSQL(ctx, &application); !res.IsZero() || err != nil {
 		return res, err
 	}
 
@@ -998,6 +1005,393 @@ func (r *ApplicationReconciler) httprouteForApplicationComponent(application *ve
 	return &httproute, nil
 }
 
+// POSTGRES HERE ---------------------------------------------------------------START
+// ---------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
+// var 2 final loop instaed
+func (r *ApplicationReconciler) ReconcilePostgreSQL(ctx context.Context, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	// Ensure that PG configuration is provided through specs, no namespace
+	if application.Spec.PostgreSQL == nil {
+		log.Error(fmt.Errorf("postgresql spec is not defined"), "PostgreSQL configuration is required for reconciliation")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    "PostgreSQLReady",
+				Status:  metav1.ConditionFalse,
+				Reason:  "MissingConfiguration",
+				Message: "PostgreSQL spec is not defined in the application",
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status after missing PostgreSQL configuration")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, fmt.Errorf("postgresql spec is not defined in the application")
+	}
+
+	resourcesToReconcile := []client.Object{}
+
+	//
+
+	// Maybe do configmag?
+
+	//  PG Secret
+	secret, err := r.secretForPostgreSQL(application)
+	if err != nil {
+		log.Error(err, "Failed to define PostgreSQL Secret")
+		return ctrl.Result{}, err
+	}
+	resourcesToReconcile = append(resourcesToReconcile, secret)
+
+	//  PG PVC
+	pvc, err := r.pvcForPostgreSQL(application)
+	if err != nil {
+		log.Error(err, "Failed to define PostgreSQL PVC")
+		return ctrl.Result{}, err
+	}
+	resourcesToReconcile = append(resourcesToReconcile, pvc)
+
+	//  PG Deployment
+	deployment, err := r.deploymentForPostgreSQL(application)
+	if err != nil {
+		log.Error(err, "Failed to define PostgreSQL Deployment")
+		return ctrl.Result{}, err
+	}
+	resourcesToReconcile = append(resourcesToReconcile, deployment)
+
+	//  PG Service
+	service, err := r.serviceForPostgreSQL(application)
+	if err != nil {
+		log.Error(err, "Failed to define PostgreSQL Service")
+		return ctrl.Result{}, err
+	}
+	resourcesToReconcile = append(resourcesToReconcile, service)
+
+	// Reconcile all resources in loop
+	for _, resource := range resourcesToReconcile {
+		if err := r.reconcilePGResource(ctx, resource, application); err != nil {
+			log.Error(err, "Failed to reconcile resource", "resourceType", reflect.TypeOf(resource).Elem().Name())
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    "PostgreSQLReady",
+					Status:  metav1.ConditionFalse,
+					Reason:  "ReconciliationError",
+					Message: fmt.Sprintf("Failed to reconcile resource: %s", reflect.TypeOf(resource).Elem().Name()),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status after reconciliation error")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+	}
+
+	// update application status based on PostgreSQL state
+	meta.SetStatusCondition(
+		&application.Status.Conditions,
+		metav1.Condition{
+			Type:    "PostgreSQLReady",
+			Status:  metav1.ConditionTrue,
+			Reason:  "Reconciled",
+			Message: "PostgreSQL resources reconciled successfully",
+		},
+	)
+
+	if err := r.Status().Update(ctx, application); err != nil {
+		log.Error(err, "Failed to update Application status after successful reconciliation")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) deploymentForPostgreSQL(application *vernaldevv1alpha1.Application) (*appsv1.Deployment, error) {
+	if application.Spec.PostgreSQL == nil {
+		return nil, errors.New("PostgreSQL spec is not defined in the application")
+	}
+
+	//TODO maybes: configmap we can mount as volume or variables, better secrets, maybe more
+
+	postgresSpec := application.Spec.PostgreSQL
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	deploymentName := fmt.Sprintf("vernal-%s-%s-postgres", application.Spec.Owner, application.GetName())
+	labels := labelsForApplicationComponent(application.GetName(), "postgres", postgresSpec.Version)              // maybe
+	secretName := fmt.Sprintf("vernal-%s-%s-postgres-credentials", application.Spec.Owner, application.GetName()) // maybe
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: namespaceName,
+			Labels:    labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: postgresSpec.Replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: v1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{
+						Name:  "postgres",
+						Image: fmt.Sprintf("postgres:%s", postgresSpec.Version), // image
+						Ports: []v1.ContainerPort{{ContainerPort: 5432}},
+						Env: []v1.EnvVar{
+							{
+								Name: "POSTGRES_USER",
+								ValueFrom: &v1.EnvVarSource{
+									SecretKeyRef: &v1.SecretKeySelector{
+										LocalObjectReference: v1.LocalObjectReference{Name: secretName},
+										Key:                  "username",
+									},
+								},
+							},
+							{
+								Name: "POSTGRES_PASSWORD",
+								ValueFrom: &v1.EnvVarSource{
+									SecretKeyRef: &v1.SecretKeySelector{
+										LocalObjectReference: v1.LocalObjectReference{Name: secretName},
+										Key:                  "password",
+									},
+								},
+							},
+							// Add additional environment variables if we need
+						},
+						//  volume mounts for PostgreSQL data and configuration
+						VolumeMounts: []v1.VolumeMount{
+							{
+								Name:      "postgres-data",
+								MountPath: "/var/lib/postgresql/data",
+							},
+							// Mount additional volumes for configurations, if we need
+						},
+					}},
+					Volumes: []v1.Volume{
+						{
+							Name: "postgres-data",
+							VolumeSource: v1.VolumeSource{
+								PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+									ClaimName: fmt.Sprintf("%s-postgres-pvc", deploymentName),
+								},
+							},
+						},
+						//  additional volumes for configurations, if we need
+					},
+				},
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, deployment, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return deployment, nil
+}
+
+func (r *ApplicationReconciler) serviceForPostgreSQL(application *vernaldevv1alpha1.Application) (*v1.Service, error) {
+	if application.Spec.PostgreSQL == nil {
+		return nil, fmt.Errorf("PostgreSQL spec not defined in application")
+	}
+
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	serviceName := fmt.Sprintf("vernal-%s-%s-postgres", application.Spec.Owner, application.GetName())
+	labels := labelsForApplicationComponent(application.GetName(), "postgres", application.Spec.PostgreSQL.Version)
+
+	service := v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: namespaceName,
+			Labels:    labels,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: labels,
+			Type:     v1.ServiceTypeClusterIP,
+			Ports: []v1.ServicePort{{
+				Protocol: v1.ProtocolTCP,
+				Port:     5432, // pg port
+			}},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, &service, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return &service, nil
+}
+
+func (r *ApplicationReconciler) pvcForPostgreSQL(application *vernaldevv1alpha1.Application) (*v1.PersistentVolumeClaim, error) {
+	if application.Spec.PostgreSQL == nil || application.Spec.PostgreSQL.Storage.Size == "" {
+		return nil, errors.New("PostgreSQL storage spec is not defined in the application")
+	}
+
+	postgresSpec := application.Spec.PostgreSQL
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	pvcName := fmt.Sprintf("vernal-%s-%s-postgres-pvc", application.Spec.Owner, application.GetName()) // maybe
+
+	pvc := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespaceName,
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{
+				v1.ReadWriteOnce,
+			},
+			Resources: v1.VolumeResourceRequirements{
+				Requests: v1.ResourceList{
+					v1.ResourceStorage: resource.MustParse(postgresSpec.Storage.Size),
+				},
+			},
+		},
+	}
+
+	if postgresSpec.Storage.StorageClass != "" {
+		pvc.Spec.StorageClassName = &postgresSpec.Storage.StorageClass
+	}
+
+	if err := ctrl.SetControllerReference(application, pvc, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return pvc, nil
+}
+
+func (r *ApplicationReconciler) secretForPostgreSQL(application *vernaldevv1alpha1.Application) (*v1.Secret, error) {
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	secretName := fmt.Sprintf("vernal-%s-%s-postgres-credentials", application.Spec.Owner, application.GetName()) // maybe
+
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: namespaceName,
+		},
+		StringData: map[string]string{ // maybe
+			"username": application.Spec.PostgreSQL.User,
+			"password": application.Spec.PostgreSQL.Password,
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, secret, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return secret, nil
+}
+
+func (r *ApplicationReconciler) reconcilePGResource(ctx context.Context, resource client.Object, application *vernaldevv1alpha1.Application) error {
+	log := log.FromContext(ctx)
+	namespacedName := types.NamespacedName{Name: resource.GetName(), Namespace: resource.GetNamespace()}
+
+	// Determine the type of the resource and handle accordingly
+	switch res := resource.(type) {
+	case *appsv1.Deployment, *v1.Service:
+		//  both Deployment and Service, the reconciliation logic is similar
+		current := res.DeepCopyObject().(client.Object)
+		err := r.Get(ctx, namespacedName, current)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("Creating resource", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+				if err := ctrl.SetControllerReference(application, resource, r.Scheme); err != nil {
+					log.Error(err, "Failed to set controller reference", "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+					return err
+				}
+				if err := r.Create(ctx, resource); err != nil {
+					log.Error(err, "Failed to create resource", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+					return err
+				}
+				log.Info("Resource created successfully", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+				return nil // Resource created successfully
+			} else {
+				// Other errors besides NotFound
+				log.Error(err, "Failed to get current state of resource", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+				return err
+			}
+		}
+
+		// Check if an update is necessary
+		if r.needsUpdate(ctx, resource, current) {
+			log.Info("Updating resource to match desired state", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+			if err := r.Update(ctx, resource); err != nil {
+				log.Error(err, "Failed to update resource", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+				return err
+			}
+			log.Info("Resource updated successfully", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+		} else {
+			log.Info("Resource already in the desired state, no update needed", "Type", reflect.TypeOf(resource).Elem().Name(), "Namespace", namespacedName.Namespace, "Name", namespacedName.Name)
+		}
+	default:
+		log.Error(fmt.Errorf("unsupported resource type"), "not supported for reconciliation", "Type", reflect.TypeOf(resource).Elem().Name())
+		return fmt.Errorf("unsupported resource type for reconcileResource: %T", resource)
+	}
+
+	return nil
+}
+
+// using deepequal
+func (r *ApplicationReconciler) needsUpdate(ctx context.Context, desired client.Object, current client.Object) bool {
+	logger := log.FromContext(ctx)
+
+	if !reflect.DeepEqual(desired, current) {
+		logger.Info("Detected changes, update needed", "Name", desired.GetName())
+		return true
+	}
+
+	logger.Info("No changes detected, update not needed", "Name", desired.GetName())
+	return false
+}
+
+// No deepequal
+// func (r *ApplicationReconciler) needsUpdate(ctx context.Context, desired client.Object, current client.Object) bool {
+//     logger := log.FromContext(ctx)
+
+//     desiredDeployment, ok := desired.(*appsv1.Deployment)
+//     if !ok {
+//         logger.Error(fmt.Errorf("expected Deployment object"), "Failed to assert desired object type")
+//         return false
+//     }
+
+//     currentDeployment, ok := current.(*appsv1.Deployment)
+//     if !ok {
+//         logger.Error(fmt.Errorf("expected Deployment object"), "Failed to assert current object type")
+//         return false
+//     }
+
+//     // compare relevant fields
+//     // more fields based on TBA requirements.
+
+//     // check if the replicas count is different
+//     if *desiredDeployment.Spec.Replicas != *currentDeployment.Spec.Replicas {
+//         return true
+//     }
+
+//     // check if the container images are different 1Container
+//     if len(desiredDeployment.Spec.Template.Spec.Containers) > 0 && len(currentDeployment.Spec.Template.Spec.Containers) > 0 {
+//         desiredImage := desiredDeployment.Spec.Template.Spec.Containers[0].Image
+//         currentImage := currentDeployment.Spec.Template.Spec.Containers[0].Image
+//         if desiredImage != currentImage {
+//             return true
+//         }
+//     }
+
+//     //more comparisons could be added here TBA , such as environment variables, resource limits, labels, annotations
+
+//     return false
+// }
+
 // labelsForApplicationNamespace returns the labels for selecting the resources
 // More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
 func labelsForApplicationNamespace(appName string, namespace string) map[string]string {
@@ -1024,7 +1418,6 @@ func labelsForApplicationComponent(appName string, componentName string, image s
 	}
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vernaldevv1alpha1.Application{}).
@@ -1032,5 +1425,9 @@ func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&v1.Namespace{}).
 		Owns(&v1.Service{}).
 		Owns(&gwv1.HTTPRoute{}).
+		Owns(&appsv1.Deployment{}).        // PostgreSQL
+		Owns(&v1.Service{}).               // PostgreSQL
+		Owns(&v1.PersistentVolumeClaim{}). // PostgreSQL
+		Owns(&v1.Secret{}).                //PostgreSQL
 		Complete(r)
 }

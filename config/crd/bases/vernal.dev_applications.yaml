@@ -58,6 +58,38 @@ spec:
                 description: Foo is an example field of Application. Edit application_types.go
                   to remove/update
                 type: string
+              postgresql:
+                properties:
+                  database:
+                    type: string
+                  password:
+                    type: string
+                  replicas:
+                    format: int32
+                    type: integer
+                  storage:
+                    description: Storage configuration for PostgreSQL PersistentVolumeClaim.
+                    properties:
+                      size:
+                        description: Size of the PersistentVolumeClaim (e.g., "1Gi",
+                          "500Mi").
+                        pattern: ^\d+(\.\d+)?(Mi|Gi|Ti|Pi|Ei)$
+                        type: string
+                      storageClass:
+                        type: string
+                    required:
+                    - size
+                    type: object
+                  user:
+                    type: string
+                  version:
+                    type: string
+                required:
+                - database
+                - password
+                - storage
+                - user
+                type: object
               repo:
                 properties:
                   path:

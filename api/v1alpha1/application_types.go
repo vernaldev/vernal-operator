@@ -23,6 +23,27 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// PostgreSQLSpec defines the desired state of PostgreSQL deployment.
+
+type PostgreSQLStorageSpec struct {
+	// Size of the PersistentVolumeClaim (e.g., "1Gi", "500Mi").
+	// +kubebuilder:validation:Pattern=`^\d+(\.\d+)?(Mi|Gi|Ti|Pi|Ei)$`
+	Size string `json:"size"`
+
+	StorageClass string `json:"storageClass,omitempty"`
+}
+
+type PostgreSQLSpec struct {
+	Database string `json:"database"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	Version  string `json:"version,omitempty"`
+	Replicas *int32 `json:"replicas,omitempty"` // num instance
+
+	// Storage configuration for PostgreSQL PersistentVolumeClaim.
+	Storage PostgreSQLStorageSpec `json:"storage"`
+}
+
 type ApplicationSpecComponent struct {
 	Name          string `json:"name"`
 	Image         string `json:"image"`
@@ -48,6 +69,7 @@ type ApplicationSpec struct {
 	Owner      string                     `json:"owner"`
 	Repo       ApplicationSpecRepo        `json:"repo"`
 	Components []ApplicationSpecComponent `json:"components"`
+	PostgreSQL *PostgreSQLSpec            `json:"postgresql,omitempty"`
 }
 
 // ApplicationStatus defines the observed state of Application
