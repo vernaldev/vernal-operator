@@ -471,15 +471,15 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	deploymentNames := make(map[string]struct{})
-	deploymentExists := struct{}{}
+	autoscalerNames := make(map[string]struct{})
+	autoscalerExists := struct{}{}
 
-	createdDeployments := false
-	updatedDeployments := false
+	createdAutoscaler := false
+	updatedAutoscaler := false
 	for _, component := range application.Spec.Components {
-		deployment, err := r.hpaForApplicationComponent(application, &component)
+		autoscaler, err := r.hpaForApplicationComponent(application, &component)
 		if err != nil {
-			log.Error(err, "Failed to define Deployment resource for Application component")
+			log.Error(err, "Failed to define Autoscaler resource for Application component")
 
 			meta.SetStatusCondition(
 				&application.Status.Conditions,
@@ -487,7 +487,7 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 					Type:    applicationStatusTypeAvailable,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Reconciling",
-					Message: fmt.Sprintf("Failed to create new Deployment resource for Application component %s: %s", component.Name, err),
+					Message: fmt.Sprintf("Failed to create new Autoscaler resource for Application component %s: %s", component.Name, err),
 				},
 			)
 
@@ -499,29 +499,29 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 			return ctrl.Result{}, err
 		}
 
-		deploymentNames[deployment.Name] = deploymentExists
+		autoscalerNames[autoscaler.Name] = autoscalerExists
 
-		found := appsv1.Deployment{}
-		err = r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &found)
+		found := autoscalingv2.HorizontalPodAutoscaler{}
+		err = r.Get(ctx, types.NamespacedName{Name: autoscaler.Name, Namespace: autoscaler.Namespace}, &found)
 		if err != nil && apierrors.IsNotFound(err) {
-			log.Info("Creating new Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+			log.Info("Creating new Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
 
-			if err := r.Create(ctx, deployment); err != nil {
-				log.Error(err, "Failed to create new Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+			if err := r.Create(ctx, autoscaler); err != nil {
+				log.Error(err, "Failed to create new Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
 				return ctrl.Result{}, err
 			}
 
-			// Deployment created successfully
-			createdDeployments = true
+			// Autoscaler created successfully
+			createdAutoscaler = true
 			continue
 		} else if err != nil {
-			log.Error(err, "Failed to get Deployment for Application component")
+			log.Error(err, "Failed to get Autoscaler for Application component")
 			// Let's return the error for the reconciliation be re-trigged again
 			return ctrl.Result{}, err
 		}
 
-		if err := r.Update(ctx, deployment, client.DryRunAll); err != nil {
-			log.Error(err, "Failed to perform client dry-run of desired deployment state for Application component")
+		if err := r.Update(ctx, autoscaler, client.DryRunAll); err != nil {
+			log.Error(err, "Failed to perform client dry-run of desired autoscaler state for Application component")
 
 			meta.SetStatusCondition(
 				&application.Status.Conditions,
@@ -529,7 +529,7 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 					Type:    applicationStatusTypeAvailable,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Reconciling",
-					Message: fmt.Sprintf("Failed to perform client dry-run of desired deployment state for Application component %s: %s", component.Name, err),
+					Message: fmt.Sprintf("Failed to perform client dry-run of desired autoscaler state for Application component %s: %s", component.Name, err),
 				},
 			)
 
@@ -541,16 +541,16 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 			return ctrl.Result{}, err
 		}
 
-		if reflect.DeepEqual(found.Spec, deployment.Spec) {
-			// Deployment has not changed; skip update
+		if reflect.DeepEqual(found.Spec, autoscaler.Spec) {
+			// Autoscaler has not changed; skip update
 			continue
 		}
 
-		log.Info("Updating Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+		log.Info("Updating Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
 
-		updatedDeployments = true
-		if err := r.Update(ctx, deployment); err != nil {
-			log.Error(err, "Failed to apply desired deployment state for Application component")
+		updatedAutoscaler = true
+		if err := r.Update(ctx, autoscaler); err != nil {
+			log.Error(err, "Failed to apply desired autoscaler state for Application component")
 
 			// Let's re-fetch the Application Custom Resource after updating the status
 			// so that we have the latest state of the resource on the cluster and we will avoid
@@ -568,7 +568,7 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 					Type:    applicationStatusTypeAvailable,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Reconciling",
-					Message: fmt.Sprintf("Failed to apply desired deployment state for Application component %s: %s", component.Name, err),
+					Message: fmt.Sprintf("Failed to apply desired autoscaler state for Application component %s: %s", component.Name, err),
 				},
 			)
 
@@ -581,19 +581,19 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 		}
 	}
 
-	deploymentList := appsv1.DeploymentList{}
+	autoscalerList := autoscalingv2.HorizontalPodAutoscalerList{}
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
 
 	if err := r.List(
 		ctx,
-		&deploymentList,
+		&autoscalerList,
 		client.InNamespace(namespaceName),
 		client.MatchingLabels{
 			"app.kubernetes.io/part-of":    application.Name,
 			"app.kubernetes.io/managed-by": "vernal-operator",
 		},
 	); err != nil {
-		log.Error(err, "Failed to list Deployment resources for Application")
+		log.Error(err, "Failed to list Autoscaler resources for Application")
 
 		meta.SetStatusCondition(
 			&application.Status.Conditions,
@@ -601,7 +601,7 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 				Type:    applicationStatusTypeAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Failed to list Deployment resources for Application: %s", err),
+				Message: fmt.Sprintf("Failed to list Autoscaler resources for Application: %s", err),
 			},
 		)
 
@@ -613,12 +613,12 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 		return ctrl.Result{}, err
 	}
 
-	for _, deployment := range deploymentList.Items {
-		if _, ok := deploymentNames[deployment.Name]; !ok {
-			log.Info("Deleting old Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+	for _, autoscaler := range autoscalerList.Items {
+		if _, ok := autoscalerNames[autoscaler.Name]; !ok {
+			log.Info("Deleting old Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
 
-			if err := r.Delete(ctx, &deployment); err != nil {
-				log.Error(err, "Failed to delete Deployment resource for Application", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
+			if err := r.Delete(ctx, &autoscaler); err != nil {
+				log.Error(err, "Failed to delete Autoscaler resource for Application", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
 
 				meta.SetStatusCondition(
 					&application.Status.Conditions,
@@ -626,7 +626,7 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 						Type:    applicationStatusTypeAvailable,
 						Status:  metav1.ConditionFalse,
 						Reason:  "Reconciling",
-						Message: fmt.Sprintf("Failed to delete Deployment resource for Application: %s", err),
+						Message: fmt.Sprintf("Failed to delete Autoscaler resource for Application: %s", err),
 					},
 				)
 
@@ -640,15 +640,15 @@ func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Con
 		}
 	}
 
-	if createdDeployments {
-		// Deployments created successfully
+	if createdAutoscaler {
+		// Autoscalers created successfully
 		// We will requeue the reconciliation so that we can ensure the state
 		// and move forward for the next operations
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	if updatedDeployments {
-		// Now, that we updated the deployments, we want to requeue the reconciliation
+	if updatedAutoscaler {
+		// Now, that we updated the autoscalers, we want to requeue the reconciliation
 		// so that we can ensure that we have the latest state of the resource before
 		// update. Also, it will help ensure the desired state on the cluster
 		return ctrl.Result{Requeue: true}, nil
@@ -1074,6 +1074,7 @@ func (r *ApplicationReconciler) namespaceForApplication(application *vernaldevv1
 func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 	labels := labelsForApplicationNamespace(application.GetName(), namespaceName)
+	var averageUtilization int32 = 50
 
 	hpa := autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1081,8 +1082,25 @@ func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernalde
 			Labels: labels,
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "vernal.dev/v1alpha1",
+				Kind:       "Application",
+				Name:       component.Name,
+			},
 			MinReplicas: &component.MinReplicas,
 			MaxReplicas: component.MaxReplicas,
+			Metrics: []autoscalingv2.MetricSpec{
+				{
+					Type: "Resource",
+					Resource: &autoscalingv2.ResourceMetricSource{
+						Name: "cpu",
+						Target: autoscalingv2.MetricTarget{
+							Type:               "Utilization",
+							AverageUtilization: &averageUtilization,
+						},
+					},
+				},
+			},
 		},
 	}
 
