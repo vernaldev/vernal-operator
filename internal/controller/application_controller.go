@@ -27,6 +27,7 @@ import (
 	redisv1beta2 "github.com/OT-CONTAINER-KIT/redis-operator/api/v1beta2"
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -67,6 +68,7 @@ type ApplicationReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=redis.redis.opstreelabs.in,resources=redis,verbs=get;list;watch;create;update;patch;delete
 
@@ -208,6 +210,10 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if res, err := r.ReconcileDeployments(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	if res, err := r.ReconcileHorizontalPodAutoscaler(ctx, req, &application); !res.IsZero() || err != nil {
 		return res, err
 	}
 
@@ -668,6 +674,7 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 			return ctrl.Result{}, err
 		}
 
+		deployment.Spec.Replicas = found.Spec.Replicas
 		if err := r.Update(ctx, deployment, client.DryRunAll); err != nil {
 			log.Error(err, "Failed to perform client dry-run of desired deployment state for Application component")
 
@@ -797,6 +804,195 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 
 	if updatedDeployments {
 		// Now, that we updated the deployments, we want to requeue the reconciliation
+		// so that we can ensure that we have the latest state of the resource before
+		// update. Also, it will help ensure the desired state on the cluster
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) ReconcileHorizontalPodAutoscaler(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	autoscalerNames := make(map[string]struct{})
+	autoscalerExists := struct{}{}
+
+	createdAutoscaler := false
+	updatedAutoscaler := false
+	for _, component := range application.Spec.Components {
+		autoscaler, err := r.hpaForApplicationComponent(application, &component)
+		if err != nil {
+			log.Error(err, "Failed to define Autoscaler resource for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to create new Autoscaler resource for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		autoscalerNames[autoscaler.Name] = autoscalerExists
+
+		found := autoscalingv2.HorizontalPodAutoscaler{}
+		err = r.Get(ctx, types.NamespacedName{Name: autoscaler.Name, Namespace: autoscaler.Namespace}, &found)
+		if err != nil && apierrors.IsNotFound(err) {
+			log.Info("Creating new Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
+
+			if err := r.Create(ctx, autoscaler); err != nil {
+				log.Error(err, "Failed to create new Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
+				return ctrl.Result{}, err
+			}
+
+			// Autoscaler created successfully
+			createdAutoscaler = true
+			continue
+		} else if err != nil {
+			log.Error(err, "Failed to get Autoscaler for Application component")
+			// Let's return the error for the reconciliation be re-trigged again
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Update(ctx, autoscaler, client.DryRunAll); err != nil {
+			log.Error(err, "Failed to perform client dry-run of desired autoscaler state for Application component")
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to perform client dry-run of desired autoscaler state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		if reflect.DeepEqual(found.Spec, autoscaler.Spec) {
+			// Autoscaler has not changed; skip update
+			continue
+		}
+
+		log.Info("Updating Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
+
+		updatedAutoscaler = true
+		if err := r.Update(ctx, autoscaler); err != nil {
+			log.Error(err, "Failed to apply desired autoscaler state for Application component")
+
+			// Let's re-fetch the Application Custom Resource after updating the status
+			// so that we have the latest state of the resource on the cluster and we will avoid
+			// raising the error "the object has been modified, please apply
+			// your changes to the latest version and try again" which would re-trigger the reconciliation
+			// if we try to update it again in the following operations
+			if err := r.Get(ctx, req.NamespacedName, application); err != nil {
+				log.Error(err, "Failed to re-fetch Application")
+				return ctrl.Result{}, err
+			}
+
+			meta.SetStatusCondition(
+				&application.Status.Conditions,
+				metav1.Condition{
+					Type:    applicationStatusTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Reconciling",
+					Message: fmt.Sprintf("Failed to apply desired autoscaler state for Application component %s: %s", component.Name, err),
+				},
+			)
+
+			if err := r.Status().Update(ctx, application); err != nil {
+				log.Error(err, "Failed to update Application status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+	}
+
+	autoscalerList := autoscalingv2.HorizontalPodAutoscalerList{}
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+
+	if err := r.List(
+		ctx,
+		&autoscalerList,
+		client.InNamespace(namespaceName),
+		client.MatchingLabels{
+			"app.kubernetes.io/part-of":    application.Name,
+			"app.kubernetes.io/managed-by": "vernal-operator",
+		},
+	); err != nil {
+		log.Error(err, "Failed to list Autoscaler resources for Application")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    applicationStatusTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to list Autoscaler resources for Application: %s", err),
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	for _, autoscaler := range autoscalerList.Items {
+		if _, ok := autoscalerNames[autoscaler.Name]; !ok {
+			log.Info("Deleting old Autoscaler", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
+
+			if err := r.Delete(ctx, &autoscaler); err != nil {
+				log.Error(err, "Failed to delete Autoscaler resource for Application", "autoscalerName", autoscaler.Name, "autoscalerNamespace", autoscaler.Namespace)
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to delete Autoscaler resource for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	if createdAutoscaler {
+		// Autoscalers created successfully
+		// We will requeue the reconciliation so that we can ensure the state
+		// and move forward for the next operations
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
+	if updatedAutoscaler {
+		// Now, that we updated the autoscalers, we want to requeue the reconciliation
 		// so that we can ensure that we have the latest state of the resource before
 		// update. Also, it will help ensure the desired state on the cluster
 		return ctrl.Result{Requeue: true}, nil
@@ -1219,6 +1415,48 @@ func (r *ApplicationReconciler) namespaceForApplication(application *vernaldevv1
 	return &namespace, nil
 }
 
+func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*autoscalingv2.HorizontalPodAutoscaler, error) {
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	deploymentName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
+	labels := labelsForApplicationNamespace(application.GetName(), namespaceName)
+	var averageUtilization int32 = 50
+
+	hpa := autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: namespaceName,
+			Labels:    labels,
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       deploymentName,
+			},
+			MinReplicas: &component.MinReplicas,
+			MaxReplicas: component.MaxReplicas,
+			Metrics: []autoscalingv2.MetricSpec{
+				{
+					Type: "Resource",
+					Resource: &autoscalingv2.ResourceMetricSource{
+						Name: "cpu",
+						Target: autoscalingv2.MetricTarget{
+							Type:               "Utilization",
+							AverageUtilization: &averageUtilization,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, &hpa, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return &hpa, nil
+}
+
 func (r *ApplicationReconciler) postgresStandaloneForApplication(application *vernaldevv1alpha1.Application) (*cnpgv1.Cluster, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
 
@@ -1332,6 +1570,17 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 						{
 							Name:  application.Spec.Postgres.UrlEnvVar,
 							Value: fmt.Sprintf("postgres://%s@postgres-rw.%s.svc.cluster.local:5432/%s", application.Name, namespaceName, application.Name),
+						},
+					},
+
+					Resources: v1.ResourceRequirements{
+						Requests: v1.ResourceList{
+							v1.ResourceCPU:    resource.MustParse("100m"),
+							v1.ResourceMemory: resource.MustParse("256Mi"),
+						},
+						Limits: v1.ResourceList{
+							v1.ResourceCPU:    resource.MustParse("100m"),
+							v1.ResourceMemory: resource.MustParse("512Mi"),
 						},
 					},
 

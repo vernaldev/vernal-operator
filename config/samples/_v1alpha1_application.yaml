@@ -12,9 +12,13 @@ spec:
   - name: whoami
     image: traefik/whoami:latest
     containerPort: 80
+    minReplicas: 1
+    maxReplicas: 3
   - name: httpbin
     image: kennethreitz/httpbin:latest
     containerPort: 80
+    minReplicas: 1
+    maxReplicas: 3
   postgres:
     enabled: true
     urlEnvVar: DATABASE_URL

@@ -27,6 +27,8 @@ type ApplicationSpecComponent struct {
 	Name          string `json:"name"`
 	Image         string `json:"image"`
 	ContainerPort uint16 `json:"containerPort"`
+	MinReplicas   int32  `json:"minReplicas"`
+	MaxReplicas   int32  `json:"maxReplicas"`
 }
 
 type ApplicationSpecRepo struct {
