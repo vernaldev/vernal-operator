@@ -66,7 +66,7 @@ type ApplicationReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=redis.redis,resources=redis,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=redis.redis.opstreelabs.in,resources=redis,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -307,8 +307,6 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 
 	redisName := make(map[string]struct{})
 	redisExists := struct{}{}
-	createdRedis := false
-	updatedRedis := false
 	redisEnabled := application.Spec.Redis.Enabled
 
 	redis, err := r.redisStandaloneForApplication(application)
@@ -351,9 +349,10 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 			}
 
 			// Deployment created successfully
-			createdRedis = true
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
 		}
 
+		return ctrl.Result{}, nil
 	} else if err != nil {
 		// Actual error occurred
 		log.Error(err, "Failed to get Redis for Application")
@@ -362,13 +361,35 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 	} else {
 		//Otherwise, redis exists, check if redis is enabled
 		if redisEnabled {
+			redis.SetResourceVersion(found.GetResourceVersion())
+
+			if err := r.Update(ctx, redis, client.DryRunAll); err != nil {
+				log.Error(err, "Failed to perform client dry-run of desired Redis state for Application component")
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to perform client dry-run of desired Redis state for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+
 			if !reflect.DeepEqual(found.Spec, redis.Spec) {
 				// Deployment has changed, so need to update redis
 				log.Info("Updating Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
 
-				updatedRedis = true
 				if err := r.Update(ctx, redis); err != nil {
-					log.Error(err, "Failed to apply desired deployment state for Application")
+					log.Error(err, "Failed to apply desired Redis state for Application")
 
 					// Let's re-fetch the Application Custom Resource after updating the status
 					// so that we have the latest state of the resource on the cluster and we will avoid
@@ -386,7 +407,7 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 							Type:    applicationStatusTypeAvailable,
 							Status:  metav1.ConditionFalse,
 							Reason:  "Reconciling",
-							Message: fmt.Sprintf("Failed to apply desired deployment state for Application: %s", err),
+							Message: fmt.Sprintf("Failed to apply desired Redis state for Application: %s", err),
 						},
 					)
 
@@ -397,7 +418,14 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 
 					return ctrl.Result{}, err
 				}
+
+				// Now, that we updated Redis, we want to requeue the reconciliation
+				// so that we can ensure that we have the latest state of the resource before
+				// update. Also, it will help ensure the desired state on the cluster
+				return ctrl.Result{Requeue: true}, nil
 			}
+
+			return ctrl.Result{}, nil
 		} else {
 			// Otherwise, redis is not enabled, so redis should be removed from the deployment
 			log.Info("Redis not enabled, deleting Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
@@ -411,7 +439,7 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 						Type:    applicationStatusTypeAvailable,
 						Status:  metav1.ConditionFalse,
 						Reason:  "Reconciling",
-						Message: fmt.Sprintf("Failed to delete Deployment resource for Application: %s", err),
+						Message: fmt.Sprintf("Failed to delete Redis resource for Application: %s", err),
 					},
 				)
 
@@ -422,45 +450,10 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 
 				return ctrl.Result{}, err
 			}
+
+			return ctrl.Result{}, nil
 		}
 	}
-
-	if err := r.Update(ctx, redis, client.DryRunAll); err != nil {
-		log.Error(err, "Failed to perform client dry-run of desired deployment state for Application component")
-
-		meta.SetStatusCondition(
-			&application.Status.Conditions,
-			metav1.Condition{
-				Type:    applicationStatusTypeAvailable,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Failed to perform client dry-run of desired deployment state for Application: %s", err),
-			},
-		)
-
-		if err := r.Status().Update(ctx, application); err != nil {
-			log.Error(err, "Failed to update Application status")
-			return ctrl.Result{}, err
-		}
-
-		return ctrl.Result{}, err
-	}
-
-	if createdRedis {
-		// Redis created successfully
-		// We will requeue the reconciliation so that we can ensure the state
-		// and move forward for the next operations
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	}
-
-	if updatedRedis {
-		// Now, that we updated Redis, we want to requeue the reconciliation
-		// so that we can ensure that we have the latest state of the resource before
-		// update. Also, it will help ensure the desired state on the cluster
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	return ctrl.Result{}, nil
 }
 
 func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
