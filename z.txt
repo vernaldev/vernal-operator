@@ -1,0 +1,30 @@
+
+
+../lab3-src/shell
+b PipeCommand.cc:
+set follow-fork-mode child
+echo /etc/r*/*s*
+echo /usr/lib/libopenblasp-r0.2.??.a
+echo /d*/*
+
+
+Operator test ->kubectl get ns
+kubectl edit applications.vernal.dev test
+
+
+make docker-build docker-push IMG=vcr.local.lan.vernal.dev:5555/vernaldev/vernal-operator:0.1.0-alpha24
+make install
+make deploy IMG=vcr.local.lan.vernal.dev:5555/vernaldev/vernal-operator:0.1.0-alpha24
+kubectl apply -k config/samples/
+
+kubectl get po -n vernal-system 
+kubectl logs -f -n vernal-system vernal-controller-manager-84c5f8bc5f-jh8td
+          
+
+
+
+
+k3d cluster stop vernal
+k3d cluster start vernal                  
+rm ~/.docker/config.json
+

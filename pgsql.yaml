@@ -1,0 +1,13 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: cluster-example-initdb
+  namespace: 
+spec:
+  instances: 3
+  bootstrap:
+    initdb:
+      database: bigdata
+      owner: pacman
+  storage:
+    size: 1Gi

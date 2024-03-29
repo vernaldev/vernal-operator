@@ -58,6 +58,70 @@ spec:
                 description: Foo is an example field of Application. Edit application_types.go
                   to remove/update
                 type: string
+              postgresql:
+                properties:
+                  PoolerReplicas:
+                    format: int32
+                    type: integer
+                  bootstrap:
+                    description: Instructions to bootstrap this cluster
+                    properties:
+                      initdb:
+                        description: Bootstrap the cluster via initdb
+                        properties:
+                          database:
+                            description: 'Name of the database used by the application.
+                              Default: `app`.'
+                            type: string
+                          owner:
+                            description: |-
+                              Name of the owner of the database in the instance to be used
+                              by applications. Defaults to the value of the `database` key.
+                            type: string
+                        type: object
+                    type: object
+                  database:
+                    type: string
+                  enabled:
+                    type: boolean
+                  instances:
+                    type: integer
+                  password:
+                    type: string
+                  replicas:
+                    format: int32
+                    type: integer
+                  storage:
+                    description: Configuration of the storage of the instances
+                    properties:
+                      size:
+                        description: |-
+                          Size of the storage. Required if not already specified in the PVC template.
+                          Changes to this field are automatically reapplied to the created PVCs.
+                          Size cannot be decreased.
+                        type: string
+                      storageClass:
+                        description: |-
+                          StorageClass to use for PVCs. Applied after
+                          evaluating the PVC template, if available.
+                          If not specified, the generated PVCs will use the
+                          default storage class
+                        type: string
+                    type: object
+                  url:
+                    type: string
+                  user:
+                    type: string
+                  version:
+                    type: string
+                required:
+                - database
+                - enabled
+                - instances
+                - password
+                - url
+                - user
+                type: object
               repo:
                 properties:
                   path:

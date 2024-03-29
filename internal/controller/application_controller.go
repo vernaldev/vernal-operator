@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -63,6 +64,7 @@ type ApplicationReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -202,6 +204,10 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if res, err := r.ReconcileHTTPRoutes(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	if res, err := r.ReconcilePostgreSQL(ctx, &application); !res.IsZero() || err != nil {
 		return res, err
 	}
 
@@ -880,7 +886,7 @@ func (r *ApplicationReconciler) namespaceForApplication(application *vernaldevv1
 func (r *ApplicationReconciler) deploymentForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*appsv1.Deployment, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 	deploymentName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
-
+	pgenvVar := fmt.Sprintf("postgres://%s@postgres-rw.%s.svc.cluster.local:5432", application.GetName(), namespaceName)
 	// TODO: Implement environment variables through Sealed Secrets
 	// secretName := fmt.Sprintf("vernal-%s-%s-%s-secret", application.Spec.Owner, application.GetName(), component.Name)
 
@@ -907,6 +913,14 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 					Image:           component.Image,
 					ImagePullPolicy: v1.PullAlways,
 					Ports:           []v1.ContainerPort{{ContainerPort: int32(component.ContainerPort)}},
+					Env: []v1.EnvVar{
+						{
+							Name:  application.Spec.PostgreSQL.Url,
+							Value: pgenvVar,
+						},
+
+						// Add additional environment variables if we need
+					},
 
 					// TODO: Implement environment variables through Sealed Secrets
 					// EnvFrom: []v1.EnvFromSource{{SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{
@@ -996,6 +1010,132 @@ func (r *ApplicationReconciler) httprouteForApplicationComponent(application *ve
 	}
 
 	return &httproute, nil
+}
+
+func (r *ApplicationReconciler) ReconcilePostgreSQL(ctx context.Context, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	// ensure that PG configuration is provided through specs, no namespace
+	if !application.Spec.PostgreSQL.Enabled {
+		log.Error(fmt.Errorf("postgresql spec is not defined"), "PostgreSQL configuration is required for reconciliation")
+
+		// check deployed
+		// remove
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    "PostgreSQLReady",
+				Status:  metav1.ConditionFalse,
+				Reason:  "MissingConfiguration",
+				Message: "PostgreSQL spec is not defined in the application",
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status after missing PostgreSQL configuration")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, fmt.Errorf("postgresql spec is not defined in the application")
+	}
+
+	// define the CloudNativePG Cluster resource
+	cluster, err := r.defineCNPGCluster(application)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// set the owner reference
+	if err := ctrl.SetControllerReference(application, cluster, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// reconcile CloudNativePG Cluster resource
+	// IE -> exists, creating or updating it as necessary
+	result, err := r.reconcileCNPGCluster(ctx, cluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile Postgres Cluster")
+		return result, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) defineCNPGCluster(application *vernaldevv1alpha1.Application) (*cnpgv1.Cluster, error) {
+	// clusterName := fmt.Sprintf("vernal-%s-postgres-cluster", application.Name)
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+
+	cluster := &cnpgv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "postgres",
+			Namespace: namespaceName,
+		},
+		Spec: cnpgv1.ClusterSpec{
+			Instances: 3,
+			Bootstrap: &cnpgv1.BootstrapConfiguration{
+				InitDB: &cnpgv1.BootstrapInitDB{
+					Database: application.Spec.PostgreSQL.Database,
+					Owner:    application.Spec.PostgreSQL.User,
+				},
+			},
+			StorageConfiguration: cnpgv1.StorageConfiguration{
+				Size: "10Gi",
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, cluster, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return cluster, nil
+}
+
+// reconcileCNPGCluster ensures that the CloudNativePG Cluster resource is created or updated to match the desired state.
+func (r *ApplicationReconciler) reconcileCNPGCluster(ctx context.Context, desiredCluster *cnpgv1.Cluster) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx)
+	currentCluster := &cnpgv1.Cluster{}
+
+	// Define the NamespacedName for the existing cluster (if it exists)
+	nn := types.NamespacedName{
+		Name:      desiredCluster.Name,
+		Namespace: desiredCluster.Namespace,
+	}
+
+	// attempt to get the current state of the cluster
+	err := r.Client.Get(ctx, nn, currentCluster)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// Cluster does not exist, attempt creation
+			log.Info("Creating Postgres Cluster", "Cluster", nn)
+			if err := r.Client.Create(ctx, desiredCluster); err != nil {
+				log.Error(err, "Failed to create Postgres Cluster", "Cluster", nn)
+				return ctrl.Result{}, err
+			}
+			log.Info("Postgres Cluster created successfully", "Cluster", nn)
+			return ctrl.Result{Requeue: true}, nil // Requeue for status update
+		} else {
+			// An error occurred that wasn't a NotFound error
+			log.Error(err, "Failed to get Postgres Cluster", "Cluster", nn)
+			return ctrl.Result{}, err
+		}
+	}
+
+	// if the cluster exists, check if it needs to be updated
+	if !reflect.DeepEqual(desiredCluster.Spec, currentCluster.Spec) {
+		log.Info("Updating Postgres Cluster", "Cluster", nn)
+		currentCluster.Spec = desiredCluster.Spec
+		if err := r.Client.Update(ctx, currentCluster); err != nil {
+			log.Error(err, "Failed to update Postgres Cluster", "Cluster", nn)
+			return ctrl.Result{}, err
+		}
+		log.Info("Postgres Cluster updated successfully", "Cluster", nn)
+		return ctrl.Result{Requeue: true}, nil // Requeue for status update
+	}
+
+	// cluster exists and is up to date, no action required
+	return ctrl.Result{}, nil
 }
 
 // labelsForApplicationNamespace returns the labels for selecting the resources

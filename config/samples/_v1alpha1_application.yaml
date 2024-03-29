@@ -15,3 +15,18 @@ spec:
   - name: httpbin
     image: kennethreitz/httpbin:latest
     containerPort: 80
+  postgresql:
+    database: mydb
+    user: myuser
+    password: mypassword
+    version: "14"
+    instances: 1
+    enabled: true
+    url: "meeee"
+    bootstrap:
+      initdb:
+        database: app
+        owner: appuser
+    storage:
+      storageClass: standard
+      size: 1Gi

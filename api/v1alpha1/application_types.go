@@ -23,6 +23,61 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// CNPG StorageConfiguration struct
+type StorageConfiguration struct {
+	// StorageClass to use for PVCs. Applied after
+	// evaluating the PVC template, if available.
+	// If not specified, the generated PVCs will use the
+	// default storage class
+	// +optional
+	StorageClass *string `json:"storageClass,omitempty"`
+
+	// Size of the storage. Required if not already specified in the PVC template.
+	// Changes to this field are automatically reapplied to the created PVCs.
+	// Size cannot be decreased.
+	// +optional
+	Size string `json:"size,omitempty"`
+}
+
+// CPNG BootstrapInitDB struct
+type BootstrapInitDB struct {
+	// Name of the database used by the application. Default: `app`.
+	// +optional
+	Database string `json:"database,omitempty"`
+
+	// Name of the owner of the database in the instance to be used
+	// by applications. Defaults to the value of the `database` key.
+	// +optional
+	Owner string `json:"owner,omitempty"`
+}
+
+// CPNG bootstrapconfig struct
+type BootstrapConfiguration struct {
+	// Bootstrap the cluster via initdb
+	// +optional
+	InitDB *BootstrapInitDB `json:"initdb,omitempty"`
+}
+
+type PostgreSQLSpec struct {
+	Database       string `json:"database"`
+	User           string `json:"user"`
+	Password       string `json:"password"`
+	Version        string `json:"version,omitempty"`
+	Replicas       *int32 `json:"replicas,omitempty"`
+	PoolerReplicas *int32 `json:"PoolerReplicas,omitempty"`
+	Instances      int    `json:"instances"`
+	Enabled        bool   `json:"enabled"`
+	Url            string `json:"url"`
+
+	// Instructions to bootstrap this cluster
+	// +optional
+	Bootstrap *BootstrapConfiguration `json:"bootstrap,omitempty"`
+
+	// Configuration of the storage of the instances
+	// +optional
+	StorageConfiguration StorageConfiguration `json:"storage,omitempty"`
+}
+
 type ApplicationSpecComponent struct {
 	Name          string `json:"name"`
 	Image         string `json:"image"`
@@ -48,6 +103,7 @@ type ApplicationSpec struct {
 	Owner      string                     `json:"owner"`
 	Repo       ApplicationSpecRepo        `json:"repo"`
 	Components []ApplicationSpecComponent `json:"components"`
+	PostgreSQL *PostgreSQLSpec            `json:"postgresql,omitempty"`
 }
 
 // ApplicationStatus defines the observed state of Application
