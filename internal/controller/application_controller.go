@@ -333,6 +333,7 @@ func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ct
 			return ctrl.Result{}, err
 		}
 
+		deployment.Spec.Replicas = found.Spec.Replicas
 		if err := r.Update(ctx, deployment, client.DryRunAll); err != nil {
 			log.Error(err, "Failed to perform client dry-run of desired deployment state for Application component")
 
@@ -1075,7 +1076,7 @@ func (r *ApplicationReconciler) namespaceForApplication(application *vernaldevv1
 
 func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
-	deploymentName := fmt.Sprintf("vernal-%s-%s-%s-autoscaler", application.Spec.Owner, application.GetName(), component.Name)
+	deploymentName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
 	labels := labelsForApplicationNamespace(application.GetName(), namespaceName)
 	var averageUtilization int32 = 50
 
@@ -1087,9 +1088,9 @@ func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernalde
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
-				APIVersion: "vernal.dev/v1alpha1",
-				Kind:       "Application",
-				Name:       component.Name,
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       deploymentName,
 			},
 			MinReplicas: &component.MinReplicas,
 			MaxReplicas: component.MaxReplicas,
