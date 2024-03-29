@@ -23,10 +23,14 @@ import (
 	"strings"
 	"time"
 
+	rediscommon "github.com/OT-CONTAINER-KIT/redis-operator/api"
+	redisv1beta2 "github.com/OT-CONTAINER-KIT/redis-operator/api/v1beta2"
+	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -63,6 +67,8 @@ type ApplicationReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=redis.redis.opstreelabs.in,resources=redis,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -193,6 +199,14 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return res, err
 	}
 
+	if res, err := r.ReconcilePostgres(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	if res, err := r.ReconcileRedis(ctx, req, &application); !res.IsZero() || err != nil {
+		return res, err
+	}
+
 	if res, err := r.ReconcileDeployments(ctx, req, &application); !res.IsZero() || err != nil {
 		return res, err
 	}
@@ -272,6 +286,334 @@ func (r *ApplicationReconciler) ReconcileNamespace(ctx context.Context, req ctrl
 	// TODO: apply namespace changes?
 
 	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) ReconcilePostgres(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	postgresName := make(map[string]struct{})
+	postgresExists := struct{}{}
+	postgresEnabled := application.Spec.Postgres.Enabled
+
+	postgres, err := r.postgresStandaloneForApplication(application)
+
+	if err != nil {
+		log.Error(err, "Failed to define Postgres resource for Application")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    applicationStatusTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to create new Postgres resource for Application: %s", err),
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	postgresName[postgres.Name] = postgresExists
+
+	found := cnpgv1.Cluster{}
+	err = r.Get(ctx, types.NamespacedName{Name: postgres.Name, Namespace: postgres.Namespace}, &found)
+
+	// If postgres does not exist
+	if err != nil && apierrors.IsNotFound(err) {
+		// If enabled is true, create a postgres deployment
+		if postgresEnabled {
+			log.Info("Creating Postgres", "postgresName", postgres.Name, "postgresNamespace", postgres.Namespace)
+
+			if err := r.Create(ctx, postgres); err != nil {
+				log.Error(err, "Failed to create Postgres", "postgresName", postgres.Name, "postgresNamespace", postgres.Namespace)
+				return ctrl.Result{}, err
+			}
+
+			// Deployment created successfully
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+
+		return ctrl.Result{}, nil
+	} else if err != nil {
+		// Actual error occurred
+		log.Error(err, "Failed to get Postgres for Application")
+		// Let's return the error for the reconciliation be re-trigged again
+		return ctrl.Result{}, err
+	} else {
+		//Otherwise, postgres exists, check if postgres is enabled
+		if postgresEnabled {
+			postgres.SetResourceVersion(found.GetResourceVersion())
+
+			if err := r.Update(ctx, postgres, client.DryRunAll); err != nil {
+				log.Error(err, "Failed to perform client dry-run of desired Postgres state for Application component")
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to perform client dry-run of desired Postgres state for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+
+			if !reflect.DeepEqual(found.Spec, postgres.Spec) {
+				// Deployment has changed, so need to update postgres
+				log.Info("Updating Postgres", "postgresName", postgres.Name, "postgresNamespace", postgres.Namespace)
+
+				if err := r.Update(ctx, postgres); err != nil {
+					log.Error(err, "Failed to apply desired Postgres state for Application")
+
+					// Let's re-fetch the Application Custom Resource after updating the status
+					// so that we have the latest state of the resource on the cluster and we will avoid
+					// raising the error "the object has been modified, please apply
+					// your changes to the latest version and try again" which would re-trigger the reconciliation
+					// if we try to update it again in the following operations
+					if err := r.Get(ctx, req.NamespacedName, application); err != nil {
+						log.Error(err, "Failed to re-fetch Application")
+						return ctrl.Result{}, err
+					}
+
+					meta.SetStatusCondition(
+						&application.Status.Conditions,
+						metav1.Condition{
+							Type:    applicationStatusTypeAvailable,
+							Status:  metav1.ConditionFalse,
+							Reason:  "Reconciling",
+							Message: fmt.Sprintf("Failed to apply desired Postgres state for Application: %s", err),
+						},
+					)
+
+					if err := r.Status().Update(ctx, application); err != nil {
+						log.Error(err, "Failed to update Application status")
+						return ctrl.Result{}, err
+					}
+
+					return ctrl.Result{}, err
+				}
+
+				// Now, that we updated Postgres, we want to requeue the reconciliation
+				// so that we can ensure that we have the latest state of the resource before
+				// update. Also, it will help ensure the desired state on the cluster
+				return ctrl.Result{Requeue: true}, nil
+			}
+
+			return ctrl.Result{}, nil
+		} else {
+			// Otherwise, postgres is not enabled, so postgres should be removed from the deployment
+			log.Info("Postgres not enabled, deleting Postgres", "postgresName", postgres.Name, "postgresNamespace", postgres.Namespace)
+
+			if err := r.Delete(ctx, postgres); err != nil {
+				log.Error(err, "Failed to delete Postgres", "postgresName", postgres.Name, "postgresNamespace", postgres.Namespace)
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to delete Postgres resource for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, nil
+		}
+	}
+}
+
+func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	/* logic for creating redis
+
+	if redis does not exist
+		if enabled is true
+			add redis
+		if enabled is false
+			do nothing
+	else if there's an error
+		log error and return
+	else redis exists
+		if enabled is true
+			if there is a change
+				update deployment
+			else
+				do nothing
+		if enabled is false
+			remove redis
+
+	*/
+
+	redisName := make(map[string]struct{})
+	redisExists := struct{}{}
+	redisEnabled := application.Spec.Redis.Enabled
+
+	redis, err := r.redisStandaloneForApplication(application)
+
+	if err != nil {
+		log.Error(err, "Failed to define Redis resource for Application")
+
+		meta.SetStatusCondition(
+			&application.Status.Conditions,
+			metav1.Condition{
+				Type:    applicationStatusTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to create new Redis resource for Application: %s", err),
+			},
+		)
+
+		if err := r.Status().Update(ctx, application); err != nil {
+			log.Error(err, "Failed to update Application status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	redisName[redis.Name] = redisExists
+
+	found := redisv1beta2.Redis{}
+	err = r.Get(ctx, types.NamespacedName{Name: redis.Name, Namespace: redis.Namespace}, &found)
+
+	// If redis does not exist
+	if err != nil && apierrors.IsNotFound(err) {
+		// If enabled is true, create a redis deployment
+		if redisEnabled {
+			log.Info("Creating Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
+
+			if err := r.Create(ctx, redis); err != nil {
+				log.Error(err, "Failed to create Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
+				return ctrl.Result{}, err
+			}
+
+			// Deployment created successfully
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+
+		return ctrl.Result{}, nil
+	} else if err != nil {
+		// Actual error occurred
+		log.Error(err, "Failed to get Redis for Application")
+		// Let's return the error for the reconciliation be re-trigged again
+		return ctrl.Result{}, err
+	} else {
+		//Otherwise, redis exists, check if redis is enabled
+		if redisEnabled {
+			redis.SetResourceVersion(found.GetResourceVersion())
+
+			if err := r.Update(ctx, redis, client.DryRunAll); err != nil {
+				log.Error(err, "Failed to perform client dry-run of desired Redis state for Application component")
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to perform client dry-run of desired Redis state for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+
+			if !reflect.DeepEqual(found.Spec, redis.Spec) {
+				// Deployment has changed, so need to update redis
+				log.Info("Updating Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
+
+				if err := r.Update(ctx, redis); err != nil {
+					log.Error(err, "Failed to apply desired Redis state for Application")
+
+					// Let's re-fetch the Application Custom Resource after updating the status
+					// so that we have the latest state of the resource on the cluster and we will avoid
+					// raising the error "the object has been modified, please apply
+					// your changes to the latest version and try again" which would re-trigger the reconciliation
+					// if we try to update it again in the following operations
+					if err := r.Get(ctx, req.NamespacedName, application); err != nil {
+						log.Error(err, "Failed to re-fetch Application")
+						return ctrl.Result{}, err
+					}
+
+					meta.SetStatusCondition(
+						&application.Status.Conditions,
+						metav1.Condition{
+							Type:    applicationStatusTypeAvailable,
+							Status:  metav1.ConditionFalse,
+							Reason:  "Reconciling",
+							Message: fmt.Sprintf("Failed to apply desired Redis state for Application: %s", err),
+						},
+					)
+
+					if err := r.Status().Update(ctx, application); err != nil {
+						log.Error(err, "Failed to update Application status")
+						return ctrl.Result{}, err
+					}
+
+					return ctrl.Result{}, err
+				}
+
+				// Now, that we updated Redis, we want to requeue the reconciliation
+				// so that we can ensure that we have the latest state of the resource before
+				// update. Also, it will help ensure the desired state on the cluster
+				return ctrl.Result{Requeue: true}, nil
+			}
+
+			return ctrl.Result{}, nil
+		} else {
+			// Otherwise, redis is not enabled, so redis should be removed from the deployment
+			log.Info("Redis not enabled, deleting Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
+
+			if err := r.Delete(ctx, redis); err != nil {
+				log.Error(err, "Failed to delete Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
+
+				meta.SetStatusCondition(
+					&application.Status.Conditions,
+					metav1.Condition{
+						Type:    applicationStatusTypeAvailable,
+						Status:  metav1.ConditionFalse,
+						Reason:  "Reconciling",
+						Message: fmt.Sprintf("Failed to delete Redis resource for Application: %s", err),
+					},
+				)
+
+				if err := r.Status().Update(ctx, application); err != nil {
+					log.Error(err, "Failed to update Application status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, nil
+		}
+	}
 }
 
 func (r *ApplicationReconciler) ReconcileDeployments(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
@@ -877,6 +1219,81 @@ func (r *ApplicationReconciler) namespaceForApplication(application *vernaldevv1
 	return &namespace, nil
 }
 
+func (r *ApplicationReconciler) postgresStandaloneForApplication(application *vernaldevv1alpha1.Application) (*cnpgv1.Cluster, error) {
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+
+	postgres := cnpgv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "postgres",
+			Namespace: namespaceName,
+		},
+		Spec: cnpgv1.ClusterSpec{
+			Instances: 1,
+			Bootstrap: &cnpgv1.BootstrapConfiguration{
+				InitDB: &cnpgv1.BootstrapInitDB{
+					Database: application.Name,
+					Owner:    application.Name,
+				},
+			},
+			StorageConfiguration: cnpgv1.StorageConfiguration{
+				Size: "10Gi",
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, &postgres, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return &postgres, nil
+}
+
+func (r *ApplicationReconciler) redisStandaloneForApplication(application *vernaldevv1alpha1.Application) (*redisv1beta2.Redis, error) {
+	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	var securityInt int64 = 1000
+
+	redisStandalone := redisv1beta2.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis",
+			Namespace: namespaceName,
+		},
+		Spec: redisv1beta2.RedisSpec{
+			KubernetesConfig: redisv1beta2.KubernetesConfig{
+				KubernetesConfig: rediscommon.KubernetesConfig{
+					Image:           "quay.io/opstree/redis:v7.0.12",
+					ImagePullPolicy: v1.PullIfNotPresent,
+				},
+			},
+			Storage: &redisv1beta2.Storage{
+				Storage: rediscommon.Storage{
+					VolumeClaimTemplate: v1.PersistentVolumeClaim{
+						Spec: v1.PersistentVolumeClaimSpec{
+							AccessModes: []v1.PersistentVolumeAccessMode{
+								"ReadWriteOnce",
+							},
+							Resources: v1.VolumeResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			SecurityContext: &v1.SecurityContext{
+				RunAsUser:  &securityInt,
+				RunAsGroup: &securityInt,
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(application, &redisStandalone, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return &redisStandalone, nil
+}
+
 func (r *ApplicationReconciler) deploymentForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*appsv1.Deployment, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 	deploymentName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
@@ -907,6 +1324,16 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 					Image:           component.Image,
 					ImagePullPolicy: v1.PullAlways,
 					Ports:           []v1.ContainerPort{{ContainerPort: int32(component.ContainerPort)}},
+					Env: []v1.EnvVar{
+						{
+							Name:  application.Spec.Redis.UrlEnvVar,
+							Value: fmt.Sprintf("redis://redis.%s.svc.cluster.local:6379/0", namespaceName),
+						},
+						{
+							Name:  application.Spec.Postgres.UrlEnvVar,
+							Value: fmt.Sprintf("postgres://%s@postgres-rw.%s.svc.cluster.local:5432/%s", application.Name, namespaceName, application.Name),
+						},
+					},
 
 					// TODO: Implement environment variables through Sealed Secrets
 					// EnvFrom: []v1.EnvFromSource{{SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{

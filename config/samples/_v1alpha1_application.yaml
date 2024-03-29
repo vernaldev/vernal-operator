@@ -15,3 +15,9 @@ spec:
   - name: httpbin
     image: kennethreitz/httpbin:latest
     containerPort: 80
+  postgres:
+    enabled: true
+    urlEnvVar: DATABASE_URL
+  redis:
+    enabled: true
+    urlEnvVar: REDIS_URL
