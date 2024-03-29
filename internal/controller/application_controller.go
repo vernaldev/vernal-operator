@@ -65,6 +65,7 @@ type ApplicationReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -1074,13 +1075,15 @@ func (r *ApplicationReconciler) namespaceForApplication(application *vernaldevv1
 
 func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	deploymentName := fmt.Sprintf("vernal-%s-%s-%s-autoscaler", application.Spec.Owner, application.GetName(), component.Name)
 	labels := labelsForApplicationNamespace(application.GetName(), namespaceName)
 	var averageUtilization int32 = 50
 
 	hpa := autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   namespaceName,
-			Labels: labels,
+			Name:      deploymentName,
+			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -1121,10 +1124,6 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 
 	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image)
 	var replicas int32 = 1
-	var cpuRequest int64 = 100
-	var memoryRequest int64 = 256
-	var cpuLimit int64 = 100
-	var memoryLimit int64 = 2512
 
 	deployment := appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1149,12 +1148,12 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 
 					Resources: v1.ResourceRequirements{
 						Requests: v1.ResourceList{
-							v1.ResourceCPU:    *resource.NewMilliQuantity(cpuRequest, resource.DecimalSI),
-							v1.ResourceMemory: *resource.NewQuantity(memoryRequest, resource.BinarySI),
+							v1.ResourceCPU:    resource.MustParse("100m"),
+							v1.ResourceMemory: resource.MustParse("256Mi"),
 						},
 						Limits: v1.ResourceList{
-							v1.ResourceCPU:    *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
-							v1.ResourceMemory: *resource.NewQuantity(memoryLimit, resource.BinarySI),
+							v1.ResourceCPU:    resource.MustParse("100m"),
+							v1.ResourceMemory: resource.MustParse("512Mi"),
 						},
 					},
 
