@@ -207,7 +207,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return res, err
 	}
 
-	if res, err := r.ReconcilePostgreSQL(ctx, &application); !res.IsZero() || err != nil {
+	if res, err := r.ReconcilePostgreSQL(ctx, req, &application); !res.IsZero() || err != nil {
 		return res, err
 	}
 
@@ -1012,57 +1012,114 @@ func (r *ApplicationReconciler) httprouteForApplicationComponent(application *ve
 	return &httproute, nil
 }
 
-func (r *ApplicationReconciler) ReconcilePostgreSQL(ctx context.Context, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
+func (r *ApplicationReconciler) ReconcilePostgreSQL(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	// ensure that PG configuration is provided through specs, no namespace
-	if !application.Spec.PostgreSQL.Enabled {
-		log.Error(fmt.Errorf("postgresql spec is not defined"), "PostgreSQL configuration is required for reconciliation")
+	postgresEnabled := application.Spec.PostgreSQL.Enabled
+	cluster, err := r.definePGCluster(application)
+	if err != nil {
+		log.Error(err, "Failed to define Postgres Cluster resource for Application")
+		return r.updateApplicationStatus(ctx, application, err, "Failed to create new Postgres Cluster resource for Application")
+	}
 
-		// check deployed
-		// remove
+	found := cnpgv1.Cluster{}
+	err = r.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, &found)
 
-		meta.SetStatusCondition(
-			&application.Status.Conditions,
-			metav1.Condition{
-				Type:    "PostgreSQLReady",
-				Status:  metav1.ConditionFalse,
-				Reason:  "MissingConfiguration",
-				Message: "PostgreSQL spec is not defined in the application",
-			},
-		)
+	if err != nil && apierrors.IsNotFound(err) {
+		if postgresEnabled {
+			return r.createPostgresCluster(ctx, cluster)
+		}
+		return ctrl.Result{}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get Postgres Cluster for Application")
+		return ctrl.Result{}, err
+	} else {
+		if postgresEnabled {
+			return r.updatePostgresCluster(ctx, req, application, cluster, found)
+		} else {
+			return r.deletePostgresCluster(ctx, application, found)
+		}
+	}
+}
 
-		if err := r.Status().Update(ctx, application); err != nil {
-			log.Error(err, "Failed to update Application status after missing PostgreSQL configuration")
-			return ctrl.Result{}, err
+func (r *ApplicationReconciler) createPostgresCluster(ctx context.Context, cluster *cnpgv1.Cluster) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	log.Info("Creating Postgres Cluster", "clusterName", cluster.Name, "clusterNamespace", cluster.Namespace)
+
+	if err := r.Create(ctx, cluster); err != nil {
+		log.Error(err, "Failed to create Postgres Cluster", "clusterName", cluster.Name, "clusterNamespace", cluster.Namespace)
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{RequeueAfter: time.Minute}, nil
+}
+
+func (r *ApplicationReconciler) updatePostgresCluster(ctx context.Context, req ctrl.Request, application *vernaldevv1alpha1.Application, cluster *cnpgv1.Cluster, found cnpgv1.Cluster) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	cluster.SetResourceVersion(found.GetResourceVersion())
+
+	if err := r.Update(ctx, cluster, client.DryRunAll); err != nil {
+		log.Error(err, "Failed to perform client dry-run of desired Postgres Cluster state for Application component")
+		return r.updateApplicationStatus(ctx, application, err, "Failed to perform client dry-run of desired Postgres Cluster state for Application")
+	}
+
+	if !reflect.DeepEqual(found.Spec, cluster.Spec) {
+		log.Info("Updating Postgres Cluster", "clusterName", cluster.Name, "clusterNamespace", cluster.Namespace)
+
+		if err := r.Update(ctx, cluster); err != nil {
+			log.Error(err, "Failed to apply desired Postgres Cluster state for Application")
+
+			if err := r.Get(ctx, req.NamespacedName, application); err != nil {
+				log.Error(err, "Failed to re-fetch Application")
+				return ctrl.Result{}, err
+			}
+
+			return r.updateApplicationStatus(ctx, application, err, "Failed to apply desired Postgres Cluster state for Application")
 		}
 
-		return ctrl.Result{}, fmt.Errorf("postgresql spec is not defined in the application")
-	}
-
-	// define the CloudNativePG Cluster resource
-	cluster, err := r.defineCNPGCluster(application)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// set the owner reference
-	if err := ctrl.SetControllerReference(application, cluster, r.Scheme); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// reconcile CloudNativePG Cluster resource
-	// IE -> exists, creating or updating it as necessary
-	result, err := r.reconcileCNPGCluster(ctx, cluster)
-	if err != nil {
-		log.Error(err, "Failed to reconcile Postgres Cluster")
-		return result, err
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	return ctrl.Result{}, nil
 }
 
-func (r *ApplicationReconciler) defineCNPGCluster(application *vernaldevv1alpha1.Application) (*cnpgv1.Cluster, error) {
+func (r *ApplicationReconciler) deletePostgresCluster(ctx context.Context, application *vernaldevv1alpha1.Application, found cnpgv1.Cluster) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	log.Info("Postgres not enabled, deleting Postgres Cluster", "clusterName", found.Name, "clusterNamespace", found.Namespace)
+
+	if err := r.Delete(ctx, &found); err != nil {
+		log.Error(err, "Failed to delete Postgres Cluster", "clusterName", found.Name, "clusterNamespace", found.Namespace)
+		return r.updateApplicationStatus(ctx, application, err, "Failed to delete Postgres Cluster resource for Application")
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) updateApplicationStatus(ctx context.Context, application *vernaldevv1alpha1.Application, err error, message string) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	meta.SetStatusCondition(
+		&application.Status.Conditions,
+		metav1.Condition{
+			Type:    applicationStatusTypeAvailable,
+			Status:  metav1.ConditionFalse,
+			Reason:  "Reconciling",
+			Message: fmt.Sprintf("%s: %s", message, err),
+		},
+	)
+
+	if err := r.Status().Update(ctx, application); err != nil {
+		log.Error(err, "Failed to update Application status")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, err
+}
+
+func (r *ApplicationReconciler) definePGCluster(application *vernaldevv1alpha1.Application) (*cnpgv1.Cluster, error) {
 	// clusterName := fmt.Sprintf("vernal-%s-postgres-cluster", application.Name)
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 
@@ -1090,52 +1147,6 @@ func (r *ApplicationReconciler) defineCNPGCluster(application *vernaldevv1alpha1
 	}
 
 	return cluster, nil
-}
-
-// reconcileCNPGCluster ensures that the CloudNativePG Cluster resource is created or updated to match the desired state.
-func (r *ApplicationReconciler) reconcileCNPGCluster(ctx context.Context, desiredCluster *cnpgv1.Cluster) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx)
-	currentCluster := &cnpgv1.Cluster{}
-
-	// Define the NamespacedName for the existing cluster (if it exists)
-	nn := types.NamespacedName{
-		Name:      desiredCluster.Name,
-		Namespace: desiredCluster.Namespace,
-	}
-
-	// attempt to get the current state of the cluster
-	err := r.Client.Get(ctx, nn, currentCluster)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			// Cluster does not exist, attempt creation
-			log.Info("Creating Postgres Cluster", "Cluster", nn)
-			if err := r.Client.Create(ctx, desiredCluster); err != nil {
-				log.Error(err, "Failed to create Postgres Cluster", "Cluster", nn)
-				return ctrl.Result{}, err
-			}
-			log.Info("Postgres Cluster created successfully", "Cluster", nn)
-			return ctrl.Result{Requeue: true}, nil // Requeue for status update
-		} else {
-			// An error occurred that wasn't a NotFound error
-			log.Error(err, "Failed to get Postgres Cluster", "Cluster", nn)
-			return ctrl.Result{}, err
-		}
-	}
-
-	// if the cluster exists, check if it needs to be updated
-	if !reflect.DeepEqual(desiredCluster.Spec, currentCluster.Spec) {
-		log.Info("Updating Postgres Cluster", "Cluster", nn)
-		currentCluster.Spec = desiredCluster.Spec
-		if err := r.Client.Update(ctx, currentCluster); err != nil {
-			log.Error(err, "Failed to update Postgres Cluster", "Cluster", nn)
-			return ctrl.Result{}, err
-		}
-		log.Info("Postgres Cluster updated successfully", "Cluster", nn)
-		return ctrl.Result{Requeue: true}, nil // Requeue for status update
-	}
-
-	// cluster exists and is up to date, no action required
-	return ctrl.Result{}, nil
 }
 
 // labelsForApplicationNamespace returns the labels for selecting the resources

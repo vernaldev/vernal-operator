@@ -21,8 +21,8 @@ spec:
     password: mypassword
     version: "14"
     instances: 1
-    enabled: true
-    url: "meeee"
+    enabled: false
+    url: "HELLOWORLDYAY"
     bootstrap:
       initdb:
         database: app
