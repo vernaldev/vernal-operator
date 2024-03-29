@@ -41,6 +41,16 @@ type ApplicationSpecRepo struct {
 	Path string `json:"path,omitempty"`
 }
 
+type ApplicationSpecPostgres struct {
+	Enabled   bool   `json:"enabled"`
+	UrlEnvVar string `json:"urlEnvVar"`
+}
+
+type ApplicationSpecRedis struct {
+	Enabled   bool   `json:"enabled"`
+	UrlEnvVar string `json:"urlEnvVar"`
+}
+
 // ApplicationSpec defines the desired state of Application
 type ApplicationSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
@@ -50,6 +60,8 @@ type ApplicationSpec struct {
 	Owner      string                     `json:"owner"`
 	Repo       ApplicationSpecRepo        `json:"repo"`
 	Components []ApplicationSpecComponent `json:"components"`
+	Postgres   ApplicationSpecPostgres    `json:"postgres"`
+	Redis      ApplicationSpecRedis       `json:"redis"`
 }
 
 // ApplicationStatus defines the observed state of Application

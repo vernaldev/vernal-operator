@@ -14,9 +14,10 @@
 
 ### To Deploy on the cluster
 **Build and push your image to the location specified by `IMG`:**
+*Note: increment the alpha version for each build*
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/vernal-operator:tag
+make docker-build docker-push IMG=vcr.local.lan.vernal.dev:5000/vernaldev/vernal-operator:0.1.0-alpha0
 ```
 
 **NOTE:** This image ought to be published in the personal registry you specified. 
@@ -30,9 +31,10 @@ make install
 ```
 
 **Deploy the Manager to the cluster with the image specified by `IMG`:**
+*Note: increment the alpha version for each build*
 
 ```sh
-make deploy IMG=<some-registry>/vernal-operator:tag
+make deploy IMG=vcr.local.lan.vernal.dev:5000/vernaldev/vernal-operator:0.1.0-alpha0
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin 
