@@ -40,8 +40,8 @@ type ApplicationSpecRepo struct {
 }
 
 type ApplicationSpecRedis struct {
-	Enabled		bool	`json:"enabled"`
-	UrlEnvVar	string	`json:"urlEnvVar"`
+	Enabled   bool   `json:"enabled"`
+	UrlEnvVar string `json:"urlEnvVar"`
 }
 
 // ApplicationSpec defines the desired state of Application
@@ -53,7 +53,7 @@ type ApplicationSpec struct {
 	Owner      string                     `json:"owner"`
 	Repo       ApplicationSpecRepo        `json:"repo"`
 	Components []ApplicationSpecComponent `json:"components"`
-	Redis 	   ApplicationSpecRedis		  `json:"redis"`
+	Redis      ApplicationSpecRedis       `json:"redis"`
 }
 
 // ApplicationStatus defines the observed state of Application

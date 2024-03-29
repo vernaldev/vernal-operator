@@ -66,6 +66,7 @@ type ApplicationReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=redis.redis,resources=redis,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -286,24 +287,23 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 
 	/* logic for creating redis
 
-		if redis does not exist
-			if enabled is true
-				add redis
-			if enabled is false
+	if redis does not exist
+		if enabled is true
+			add redis
+		if enabled is false
+			do nothing
+	else if there's an error
+		log error and return
+	else redis exists
+		if enabled is true
+			if there is a change
+				update deployment
+			else
 				do nothing
-		else if there's an error
-			log error and return
-		else redis exists 
-			if enabled is true
-				if there is a change
-					update deployment
-				else
-					do nothing
-			if enabled is false
-				remove redis
-		
-	*/
+		if enabled is false
+			remove redis
 
+	*/
 
 	redisName := make(map[string]struct{})
 	redisExists := struct{}{}
@@ -312,7 +312,7 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 	redisEnabled := application.Spec.Redis.Enabled
 
 	redis, err := r.redisStandaloneForApplication(application)
-	
+
 	if err != nil {
 		log.Error(err, "Failed to define Redis resource for Application")
 
@@ -352,8 +352,8 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 
 			// Deployment created successfully
 			createdRedis = true
-		}	
-		
+		}
+
 	} else if err != nil {
 		// Actual error occurred
 		log.Error(err, "Failed to get Redis for Application")
@@ -404,7 +404,7 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 
 			if err := r.Delete(ctx, redis); err != nil {
 				log.Error(err, "Failed to delete Redis", "redisName", redis.Name, "redisNamespace", redis.Namespace)
-				
+
 				meta.SetStatusCondition(
 					&application.Status.Conditions,
 					metav1.Condition{
@@ -423,7 +423,7 @@ func (r *ApplicationReconciler) ReconcileRedis(ctx context.Context, req ctrl.Req
 				return ctrl.Result{}, err
 			}
 		}
-	} 
+	}
 
 	if err := r.Update(ctx, redis, client.DryRunAll); err != nil {
 		log.Error(err, "Failed to perform client dry-run of desired deployment state for Application component")
@@ -1072,13 +1072,13 @@ func (r *ApplicationReconciler) redisStandaloneForApplication(application *verna
 
 	redisStandalone := redisv1beta2.Redis{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "redis",
+			Name:      "redis",
 			Namespace: namespaceName,
 		},
 		Spec: redisv1beta2.RedisSpec{
 			KubernetesConfig: redisv1beta2.KubernetesConfig{
 				KubernetesConfig: rediscommon.KubernetesConfig{
-					Image: "quay.io/opstree/redis:v7.0.12",
+					Image:           "quay.io/opstree/redis:v7.0.12",
 					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			},
@@ -1099,7 +1099,7 @@ func (r *ApplicationReconciler) redisStandaloneForApplication(application *verna
 				},
 			},
 			SecurityContext: &v1.SecurityContext{
-				RunAsUser: &securityInt,
+				RunAsUser:  &securityInt,
 				RunAsGroup: &securityInt,
 			},
 		},
@@ -1144,8 +1144,8 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 					ImagePullPolicy: v1.PullAlways,
 					Ports:           []v1.ContainerPort{{ContainerPort: int32(component.ContainerPort)}},
 					Env: []v1.EnvVar{{
-						Name: 	application.Spec.Redis.UrlEnvVar,
-						Value: 	redisEnvValue,
+						Name:  application.Spec.Redis.UrlEnvVar,
+						Value: redisEnvValue,
 					}},
 
 					// TODO: Implement environment variables through Sealed Secrets
