@@ -46,11 +46,19 @@ spec:
                       type: integer
                     image:
                       type: string
+                    maxReplicas:
+                      format: int32
+                      type: integer
+                    minReplicas:
+                      format: int32
+                      type: integer
                     name:
                       type: string
                   required:
                   - containerPort
                   - image
+                  - maxReplicas
+                  - minReplicas
                   - name
                   type: object
                 type: array
