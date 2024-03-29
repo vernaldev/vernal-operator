@@ -58,6 +58,16 @@ spec:
                 description: Foo is an example field of Application. Edit application_types.go
                   to remove/update
                 type: string
+              postgres:
+                properties:
+                  enabled:
+                    type: boolean
+                  urlEnvVar:
+                    type: string
+                required:
+                - enabled
+                - urlEnvVar
+                type: object
               redis:
                 properties:
                   enabled:
@@ -84,6 +94,7 @@ spec:
             required:
             - components
             - owner
+            - postgres
             - redis
             - repo
             type: object

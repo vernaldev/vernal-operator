@@ -39,6 +39,11 @@ type ApplicationSpecRepo struct {
 	Path string `json:"path,omitempty"`
 }
 
+type ApplicationSpecPostgres struct {
+	Enabled   bool   `json:"enabled"`
+	UrlEnvVar string `json:"urlEnvVar"`
+}
+
 type ApplicationSpecRedis struct {
 	Enabled   bool   `json:"enabled"`
 	UrlEnvVar string `json:"urlEnvVar"`
@@ -53,6 +58,7 @@ type ApplicationSpec struct {
 	Owner      string                     `json:"owner"`
 	Repo       ApplicationSpecRepo        `json:"repo"`
 	Components []ApplicationSpecComponent `json:"components"`
+	Postgres   ApplicationSpecPostgres    `json:"postgres"`
 	Redis      ApplicationSpecRedis       `json:"redis"`
 }
 
