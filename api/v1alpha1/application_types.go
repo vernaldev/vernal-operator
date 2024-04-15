@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -24,11 +25,12 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 type ApplicationSpecComponent struct {
-	Name          string `json:"name"`
-	Image         string `json:"image"`
-	ContainerPort uint16 `json:"containerPort"`
-	MinReplicas   int32  `json:"minReplicas"`
-	MaxReplicas   int32  `json:"maxReplicas"`
+	Name          string      `json:"name"`
+	Image         string      `json:"image"`
+	ContainerPort uint16      `json:"containerPort"`
+	MinReplicas   int32       `json:"minReplicas"`
+	MaxReplicas   int32       `json:"maxReplicas"`
+	EnvVars       []v1.EnvVar `json:"env"`
 }
 
 type ApplicationSpecRepo struct {
