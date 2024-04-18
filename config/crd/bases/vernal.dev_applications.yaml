@@ -39,6 +39,18 @@ spec:
           spec:
             description: ApplicationSpec defines the desired state of Application
             properties:
+              auth:
+                properties:
+                  emails:
+                    items:
+                      type: string
+                    type: array
+                  enabled:
+                    type: boolean
+                required:
+                - emails
+                - enabled
+                type: object
               components:
                 items:
                   properties:
@@ -100,6 +112,7 @@ spec:
                 - url
                 type: object
             required:
+            - auth
             - components
             - owner
             - postgres

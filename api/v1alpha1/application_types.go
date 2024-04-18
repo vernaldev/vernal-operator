@@ -51,6 +51,11 @@ type ApplicationSpecRedis struct {
 	UrlEnvVar string `json:"urlEnvVar"`
 }
 
+type ApplicationSpecAuth struct {
+	Enabled bool     `json:"enabled"`
+	Emails  []string `json:"emails"`
+}
+
 // ApplicationSpec defines the desired state of Application
 type ApplicationSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
@@ -62,6 +67,7 @@ type ApplicationSpec struct {
 	Components []ApplicationSpecComponent `json:"components"`
 	Postgres   ApplicationSpecPostgres    `json:"postgres"`
 	Redis      ApplicationSpecRedis       `json:"redis"`
+	Auth       ApplicationSpecAuth        `json:"auth"`
 }
 
 // ApplicationStatus defines the observed state of Application
