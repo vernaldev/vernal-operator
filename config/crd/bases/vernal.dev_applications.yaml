@@ -169,7 +169,6 @@ spec:
                       type: string
                   required:
                   - containerPort
-                  - env
                   - image
                   - maxReplicas
                   - minReplicas

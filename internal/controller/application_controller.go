@@ -1593,7 +1593,9 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 		},
 	}
 
-	deployment.Spec.Template.Spec.Containers[0].Env = append(deployment.Spec.Template.Spec.Containers[0].Env, component.EnvVars...)
+	if component.EnvVars != nil {
+		deployment.Spec.Template.Spec.Containers[0].Env = append(deployment.Spec.Template.Spec.Containers[0].Env, *component.EnvVars...)
+	}
 
 	if err := ctrl.SetControllerReference(application, &deployment, r.Scheme); err != nil {
 		return nil, err

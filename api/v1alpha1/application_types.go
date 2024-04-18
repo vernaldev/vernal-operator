@@ -25,12 +25,13 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 type ApplicationSpecComponent struct {
-	Name          string      `json:"name"`
-	Image         string      `json:"image"`
-	ContainerPort uint16      `json:"containerPort"`
-	MinReplicas   int32       `json:"minReplicas"`
-	MaxReplicas   int32       `json:"maxReplicas"`
-	EnvVars       []v1.EnvVar `json:"env"`
+	Name          string `json:"name"`
+	Image         string `json:"image"`
+	ContainerPort uint16 `json:"containerPort"`
+	MinReplicas   int32  `json:"minReplicas"`
+	MaxReplicas   int32  `json:"maxReplicas"`
+	// +optional
+	EnvVars *[]v1.EnvVar `json:"env,omitempty"`
 }
 
 type ApplicationSpecRepo struct {
