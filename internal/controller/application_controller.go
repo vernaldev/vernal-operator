@@ -1459,11 +1459,13 @@ func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernalde
 
 func (r *ApplicationReconciler) postgresStandaloneForApplication(application *vernaldevv1alpha1.Application) (*cnpgv1.Cluster, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+	labels := labelsForStandaloneForApplication(application.GetName(), application.GetLabels())
 
 	postgres := cnpgv1.Cluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "postgres",
 			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: cnpgv1.ClusterSpec{
 			Instances: 1,
@@ -1488,12 +1490,15 @@ func (r *ApplicationReconciler) postgresStandaloneForApplication(application *ve
 
 func (r *ApplicationReconciler) redisStandaloneForApplication(application *vernaldevv1alpha1.Application) (*redisv1beta2.Redis, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	labels := labelsForStandaloneForApplication(application.GetName(), application.GetLabels())
+
 	var securityInt int64 = 1000
 
 	redisStandalone := redisv1beta2.Redis{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "redis",
 			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: redisv1beta2.RedisSpec{
 			KubernetesConfig: redisv1beta2.KubernetesConfig{
@@ -1692,6 +1697,20 @@ func labelsForApplicationComponent(appName string, componentName string, image s
 	labels := map[string]string{
 		"app.kubernetes.io/name":       componentName,
 		"app.kubernetes.io/version":    imageTag,
+		"app.kubernetes.io/part-of":    appName,
+		"app.kubernetes.io/managed-by": "vernal-operator",
+	}
+
+	// Merge existing application labels with new labels
+	for key, value := range applicationLabels {
+		labels[key] = value
+	}
+
+	return labels
+}
+
+func labelsForStandaloneForApplication(appName string, applicationLabels map[string]string) map[string]string {
+	labels := map[string]string{
 		"app.kubernetes.io/part-of":    appName,
 		"app.kubernetes.io/managed-by": "vernal-operator",
 	}
