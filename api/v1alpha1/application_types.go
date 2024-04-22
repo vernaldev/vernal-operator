@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -29,6 +30,8 @@ type ApplicationSpecComponent struct {
 	ContainerPort uint16 `json:"containerPort"`
 	MinReplicas   int32  `json:"minReplicas"`
 	MaxReplicas   int32  `json:"maxReplicas"`
+	// +optional
+	EnvVars *[]v1.EnvVar `json:"env,omitempty"`
 }
 
 type ApplicationSpecRepo struct {

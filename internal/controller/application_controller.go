@@ -1459,11 +1459,13 @@ func (r *ApplicationReconciler) hpaForApplicationComponent(application *vernalde
 
 func (r *ApplicationReconciler) postgresStandaloneForApplication(application *vernaldevv1alpha1.Application) (*cnpgv1.Cluster, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.Name)
+	labels := labelsForStandaloneForApplication(application.GetName(), application.GetLabels())
 
 	postgres := cnpgv1.Cluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "postgres",
 			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: cnpgv1.ClusterSpec{
 			Instances: 1,
@@ -1488,12 +1490,15 @@ func (r *ApplicationReconciler) postgresStandaloneForApplication(application *ve
 
 func (r *ApplicationReconciler) redisStandaloneForApplication(application *vernaldevv1alpha1.Application) (*redisv1beta2.Redis, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
+	labels := labelsForStandaloneForApplication(application.GetName(), application.GetLabels())
+
 	var securityInt int64 = 1000
 
 	redisStandalone := redisv1beta2.Redis{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "redis",
 			Namespace: namespaceName,
+			Labels:    labels,
 		},
 		Spec: redisv1beta2.RedisSpec{
 			KubernetesConfig: redisv1beta2.KubernetesConfig{
@@ -1539,7 +1544,7 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 	// TODO: Implement environment variables through Sealed Secrets
 	// secretName := fmt.Sprintf("vernal-%s-%s-%s-secret", application.Spec.Owner, application.GetName(), component.Name)
 
-	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image)
+	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image, application.GetLabels())
 	var replicas int32 = 1
 
 	deployment := appsv1.Deployment{
@@ -1583,14 +1588,13 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 							v1.ResourceMemory: resource.MustParse("512Mi"),
 						},
 					},
-
-					// TODO: Implement environment variables through Sealed Secrets
-					// EnvFrom: []v1.EnvFromSource{{SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{
-					// 	Name: secretName,
-					// }}}},
 				}}},
 			},
 		},
+	}
+
+	if component.EnvVars != nil {
+		deployment.Spec.Template.Spec.Containers[0].Env = append(deployment.Spec.Template.Spec.Containers[0].Env, *component.EnvVars...)
 	}
 
 	if err := ctrl.SetControllerReference(application, &deployment, r.Scheme); err != nil {
@@ -1603,7 +1607,7 @@ func (r *ApplicationReconciler) deploymentForApplicationComponent(application *v
 func (r *ApplicationReconciler) serviceForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*v1.Service, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 	serviceName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
-	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image)
+	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image, application.GetLabels())
 
 	service := v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1632,7 +1636,7 @@ func (r *ApplicationReconciler) serviceForApplicationComponent(application *vern
 func (r *ApplicationReconciler) httprouteForApplicationComponent(application *vernaldevv1alpha1.Application, component *vernaldevv1alpha1.ApplicationSpecComponent) (*gwv1.HTTPRoute, error) {
 	namespaceName := fmt.Sprintf("vernal-%s-%s", application.Spec.Owner, application.GetName())
 	commonName := fmt.Sprintf("vernal-%s-%s-%s", application.Spec.Owner, application.GetName(), component.Name)
-	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image)
+	labels := labelsForApplicationComponent(application.GetName(), component.Name, component.Image, application.GetLabels())
 
 	parentRefName := gwv1.ObjectName("vernal")
 	parentRefNamespace := gwv1.Namespace("istio-ingress")
@@ -1689,15 +1693,36 @@ func labelsForApplicationNamespace(appName string, namespace string) map[string]
 
 // labelsForApplicationComponent returns the labels for selecting the resources
 // More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
-func labelsForApplicationComponent(appName string, componentName string, image string) map[string]string {
+func labelsForApplicationComponent(appName string, componentName string, image string, applicationLabels map[string]string) map[string]string {
 	imageTag := strings.Split(image, ":")[1]
 
-	return map[string]string{
+	labels := map[string]string{
 		"app.kubernetes.io/name":       componentName,
 		"app.kubernetes.io/version":    imageTag,
 		"app.kubernetes.io/part-of":    appName,
 		"app.kubernetes.io/managed-by": "vernal-operator",
 	}
+
+	// Merge existing application labels with new labels
+	for key, value := range applicationLabels {
+		labels[key] = value
+	}
+
+	return labels
+}
+
+func labelsForStandaloneForApplication(appName string, applicationLabels map[string]string) map[string]string {
+	labels := map[string]string{
+		"app.kubernetes.io/part-of":    appName,
+		"app.kubernetes.io/managed-by": "vernal-operator",
+	}
+
+	// Merge existing application labels with new labels
+	for key, value := range applicationLabels {
+		labels[key] = value
+	}
+
+	return labels
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -2,6 +2,8 @@ apiVersion: vernal.dev/v1alpha1
 kind: Application
 metadata:
   name: test
+  labels:
+    backstage.io/kubernetes-id: kubernetes-plugin-id-test
 spec:
   owner: dennis
   repo:
@@ -14,11 +16,17 @@ spec:
     containerPort: 80
     minReplicas: 1
     maxReplicas: 3
+    env:
+    - name: DEMO_GREETING
+      value: "Hello from the environment"
   - name: httpbin
     image: kennethreitz/httpbin:latest
     containerPort: 80
     minReplicas: 1
     maxReplicas: 3
+    env:
+    - name: DEMO_GREETING
+      value: "Hello from the environment"
   postgres:
     enabled: true
     urlEnvVar: DATABASE_URL
